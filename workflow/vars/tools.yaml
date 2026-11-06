@@ -1,4 +1,5 @@
-# The tools offered to the model. Each one is run by a workflow named tool_<name>.
+# The tools offered to the model. Each one is run by the workflow tools.<name>
+# (workflows/tools/<name>.yaml).
 # eager_input_streaming: tool input streams as it is written (shown as a running count) instead
 # of arriving in one burst; history.py assemble then checks it is a JSON object.
 tools:

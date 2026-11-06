@@ -1,17 +1,17 @@
-name: tool_read_file
+name: tools.grep
 vars:
   block: null
   session_file: null
 steps:
-  - name: read
+  - name: search
     type: script_exec
     ignore_errors: true
     params:
       interpreter: python3
       path: search.py
-      args: [read]
+      args: [grep]
       stdin: "{{ block.input }}"
-    register: read
+    register: search
 
   - name: result
     type: set_fact
@@ -21,8 +21,7 @@ steps:
         content:
           - type: tool_result
             tool_use_id: "{{ block.id }}"
-            is_error: "{{ read.exit_code != 0 }}"
-            content: "{% if read.exit_code != 0 %}{{ read.stdout | truncatechars:2000 }}{% else %}{{ read.stdout | truncatechars:max_tool_output }}{% endif %}"
+            content: "{% if search.exit_code != 0 %}error: {{ search.stderr | truncatechars:2000 }}{% else %}{{ search.stdout | truncatechars:max_tool_output }}{% endif %}"
 
   - name: record
     type: write_file
@@ -36,5 +35,5 @@ steps:
     params:
       interpreter: python3
       path: show.py
-      args: [call, Read, "{{ block.input.path }}"]
+      args: [call, Grep, "{{ block.input.pattern }}"]
       stdin: "{{ message }}"

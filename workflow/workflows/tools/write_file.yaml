@@ -1,4 +1,4 @@
-name: tool_write_file
+name: tools.write_file
 vars:
   block: null
   session_file: null

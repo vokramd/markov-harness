@@ -1,4 +1,4 @@
-name: tool_grep
+name: tools.glob
 vars:
   block: null
   session_file: null
@@ -9,7 +9,7 @@ steps:
     params:
       interpreter: python3
       path: search.py
-      args: [grep]
+      args: [glob]
       stdin: "{{ block.input }}"
     register: search
 
@@ -35,5 +35,5 @@ steps:
     params:
       interpreter: python3
       path: show.py
-      args: [call, Grep, "{{ block.input.pattern }}"]
+      args: [call, Glob, "{{ block.input.pattern }}"]
       stdin: "{{ message }}"

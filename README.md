@@ -33,7 +33,7 @@ The harness is a markov [directory workflow](../markov/docs/reference/workflow-f
 | `workflow/workflows/turn.yaml` | One user turn: prompt, record, repeat `agent_step`, memory extraction |
 | `workflow/workflows/agent_step.yaml` | One model call and the tools it asks for |
 | `workflow/workflows/extract_memories.yaml`, `extract_step.yaml` | The memory extraction pass |
-| `workflow/workflows/tool_*.yaml` | One workflow per tool (`tool_bash`, `tool_read_file`, …, `tool_unknown`) |
+| `workflow/workflows/tools/*.yaml` | One workflow per tool, named by its path: `tools.bash`, `tools.read_file`, …, `tools.unknown` |
 | `workflow/scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`) |
 | `workflow/rules.yaml`, `step_types.yaml` | Empty; markov requires them |
 
@@ -135,7 +135,7 @@ Not copied (yet): relevance-selected recall and periodic consolidation ("dream")
 | Conversation state | `/state/sessions/<run>.jsonl` (host: `.state/container/sessions/`), one message per line, appended with `write_file` |
 | Request shaping | `workflow/scripts/history.py` turns the JSONL into `messages`, merging same-role lines |
 | Model call | `http_request` to `relay-api.local/v1/messages` with `stream: {format: sse, text: delta.text, thinking: delta.thinking}`; `--callback tty://` prints each text delta as it arrives, and the thinking summary dimmed before it, and `history.py assemble` rebuilds the message from the events |
-| Tools | one workflow per tool, `tool_<name>`, dispatched with `for_each` over `tool_use` blocks: read-only ones with `concurrency: 4`, then the rest one at a time |
+| Tools | one workflow per tool, `tools.<name>` (`workflows/tools/<name>.yaml`), dispatched with `for_each` over `tool_use` blocks: read-only ones with `concurrency: 4`, then the rest one at a time |
 | Live display | `--callback "tty://?show=text,thinking:dim,output:lines,tool_input:count"`: reply text, thinking dimmed, bash output lines, and a running count of tool input |
 | Caching | top-level `cache_control: {type: ephemeral}` caches the conversation so far; the usage line shows `cache read N write N` |
 | Output | `workflow/scripts/show.py` writes to `/dev/tty`, because markov captures step stdout |

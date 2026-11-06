@@ -7,8 +7,8 @@
 # Shape:
 #   main ─▶ turn ─▶ prompt ─▶ append user msg ─▶ agent_step   (turn: repeat until /exit)
 #   agent_step ─▶ build request from session JSONL ─▶ POST /v1/messages ─▶ append assistant msg
-#              ─▶ print text ─▶ for_each tool_use: workflow tool_<name>   (agent_step: repeat while stop_reason == tool_use)
-#   tool_<name> ─▶ (approve) ─▶ run ─▶ append tool_result
+#              ─▶ print text ─▶ for_each tool_use: workflow tools.<name>   (agent_step: repeat while stop_reason == tool_use)
+#   tools.<name> (workflows/tools/<name>.yaml) ─▶ (approve) ─▶ run ─▶ append tool_result
 #   Read-only tools (read_file, glob, grep) run in parallel and need no approval; the others run one
 #   at a time, each asking first unless approve=auto.
 #   Memory: files in memory_dir persist across sessions; its MEMORY.md index is snapshotted at session

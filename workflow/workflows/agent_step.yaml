@@ -107,7 +107,7 @@ steps:
     as: block
     for_each_when: "block.type == 'tool_use' and block.name in readonly_tools and not (block.id in reply.invalid)"
     concurrency: 4         # read-only tools in parallel
-    workflow: "tool_{{ block.name }}"
+    workflow: "tools.{{ block.name }}"
     vars:
       block: "{{ block }}"
       session_file: "{{ session_file }}"
@@ -118,7 +118,7 @@ steps:
     as: block
     for_each_when: "block.type == 'tool_use' and block.name in mutating_tools and not (block.id in reply.invalid)"
     concurrency: 1
-    workflow: "tool_{{ block.name }}"
+    workflow: "tools.{{ block.name }}"
     vars:
       block: "{{ block }}"
       session_file: "{{ session_file }}"
@@ -128,7 +128,7 @@ steps:
     for_each: reply.content
     as: block
     for_each_when: "block.type == 'tool_use' and (block.id in reply.invalid or not (block.name in readonly_tools or block.name in mutating_tools))"
-    workflow: tool_unknown
+    workflow: tools.unknown
     vars:
       block: "{{ block }}"
       session_file: "{{ session_file }}"

@@ -1,4 +1,4 @@
-name: tool_bash
+name: tools.bash
 vars:
   block: null
   session_file: null

@@ -1,4 +1,4 @@
-name: tool_unknown
+name: tools.unknown
 vars:
   block: null
   session_file: null
