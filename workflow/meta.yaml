@@ -1,0 +1,21 @@
+# markov-harness: a minimal coding-agent harness (a tiny Claude Code) built as a markov workflow.
+#
+#   bin/harness                       # new session, in a podman container (see bin/harness)
+#   bin/harness --var session=/state/sessions/<id>.jsonl   # resume one
+#   bin/harness --var approve=auto    # run tools without asking
+#
+# Shape:
+#   main ─▶ turn ─▶ prompt ─▶ append user msg ─▶ agent_step   (turn: repeat until /exit)
+#   agent_step ─▶ build request from session JSONL ─▶ POST /v1/messages ─▶ append assistant msg
+#              ─▶ print text ─▶ for_each tool_use: workflow tool_<name>   (agent_step: repeat while stop_reason == tool_use)
+#   tool_<name> ─▶ (approve) ─▶ run ─▶ append tool_result
+#   Read-only tools (read_file, glob, grep) run in parallel and need no approval; the others run one
+#   at a time, each asking first unless approve=auto.
+#   Memory: files in memory_dir persist across sessions; its MEMORY.md index is snapshotted at session
+#   start and put in the first user message, and writes/edits of .md files there need no approval.
+#   After each turn, extract_memories forks the conversation with Claude Code's extraction prompt and
+#   lets the model save what is worth keeping (scripts/memory.py runs its tools, limited to memory_dir).
+#
+# All conversation state lives in the session file (one message per line); workflows pass only its path.
+
+entrypoint: main

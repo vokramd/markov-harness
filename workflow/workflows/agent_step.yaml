@@ -1,0 +1,135 @@
+# One model call, plus the tools it asked for; turn repeats it while the model wants tool results.
+name: agent_step
+vars:
+  session_file: null
+  relay_api_key: null
+  request_base: null
+steps:
+  - name: build
+    type: script_exec
+    params:
+      interpreter: python3
+      path: history.py
+      args: [messages, "{{ session_file }}", "{{ session_file }}.context"]
+    register: history
+
+  - name: reply_gap
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [gap]
+
+  # Streams: each text delta reaches the terminal as it arrives through --callback tty://.
+  - name: call_model
+    type: http_request
+    params:
+      method: POST
+      url: "{{ relay_base_url }}/v1/messages"
+      headers:
+        x-api-key: "{{ relay_api_key }}"
+        anthropic-version: "2023-06-01"
+      ignore_status: true
+      stream:
+        format: sse
+        text: delta.text
+        thinking: delta.thinking
+        progress:
+          tool_input: delta.partial_json   # bin/harness shows it as a running count
+      body:
+        model: "{{ model }}"
+        max_tokens: "{{ max_tokens }}"
+        stream: true
+        cache_control: {type: ephemeral}   # cache the conversation so far for the next call
+        thinking: "{{ request_base.thinking }}"
+        system: "{{ request_base.system }}"   # built once in main (step request), shared with extract_step
+        tools: "{{ tools }}"
+        messages: "{{ history.stdout | from_json }}"
+    register: response
+
+  # The stream's events back into one message: {content, stop_reason, usage}, or {error, status}.
+  - name: assemble
+    type: script_exec
+    params:
+      interpreter: python3
+      path: history.py
+      args: [assemble]
+      stdin: "{{ response }}"
+    register: assembled
+
+  - name: parse_reply
+    type: set_fact
+    vars:
+      reply: "{{ assembled.stdout | from_json }}"
+
+  - name: check_ok
+    type: set_fact
+    vars:
+      ok: "not reply.error"
+
+  - name: show_error
+    type: script_exec
+    when: "not ok"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [error, "{{ reply.status }}"]
+      stdin: "{{ reply.error }}"
+
+  - name: assistant_msg
+    type: set_fact
+    when: "ok"
+    vars:
+      message:
+        role: assistant
+        content: "{{ reply.content }}"
+
+  - name: record_assistant
+    type: write_file
+    when: "ok"
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ message | to_json }}\n"
+
+  - name: show_reply
+    type: script_exec
+    when: "ok"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [reply]
+      stdin: "{{ reply }}"
+
+  - name: run_readonly
+    when: "ok"
+    for_each: reply.content
+    as: block
+    for_each_when: "block.type == 'tool_use' and block.name in readonly_tools and not (block.id in reply.invalid)"
+    concurrency: 4         # read-only tools in parallel
+    workflow: "tool_{{ block.name }}"
+    vars:
+      block: "{{ block }}"
+      session_file: "{{ session_file }}"
+
+  - name: run_mutating
+    when: "ok"
+    for_each: reply.content
+    as: block
+    for_each_when: "block.type == 'tool_use' and block.name in mutating_tools and not (block.id in reply.invalid)"
+    concurrency: 1
+    workflow: "tool_{{ block.name }}"
+    vars:
+      block: "{{ block }}"
+      session_file: "{{ session_file }}"
+
+  - name: unknown_tools
+    when: "ok"
+    for_each: reply.content
+    as: block
+    for_each_when: "block.type == 'tool_use' and (block.id in reply.invalid or not (block.name in readonly_tools or block.name in mutating_tools))"
+    workflow: tool_unknown
+    vars:
+      block: "{{ block }}"
+      session_file: "{{ session_file }}"
+      invalid: "{{ block.id in reply.invalid }}"

@@ -1,0 +1,39 @@
+name: tool_glob
+vars:
+  block: null
+  session_file: null
+steps:
+  - name: search
+    type: script_exec
+    ignore_errors: true
+    params:
+      interpreter: python3
+      path: search.py
+      args: [glob]
+      stdin: "{{ block.input }}"
+    register: search
+
+  - name: result
+    type: set_fact
+    vars:
+      message:
+        role: user
+        content:
+          - type: tool_result
+            tool_use_id: "{{ block.id }}"
+            content: "{% if search.exit_code != 0 %}error: {{ search.stderr | truncatechars:2000 }}{% else %}{{ search.stdout | truncatechars:max_tool_output }}{% endif %}"
+
+  - name: record
+    type: write_file
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ message | to_json }}\n"
+
+  - name: show
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [call, Glob, "{{ block.input.pattern }}"]
+      stdin: "{{ message }}"

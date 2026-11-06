@@ -1,0 +1,31 @@
+name: tool_unknown
+vars:
+  block: null
+  session_file: null
+  invalid: false
+steps:
+  - name: result
+    type: set_fact
+    vars:
+      message:
+        role: user
+        content:
+          - type: tool_result
+            tool_use_id: "{{ block.id }}"
+            is_error: true
+            content: "{% if invalid %}The input for {{ block.name }} was not a complete JSON object, so it was not run.{% else %}Unknown tool: {{ block.name }}{% endif %}"
+
+  - name: record
+    type: write_file
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ message | to_json }}\n"
+
+  - name: preview
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [result]
+      stdin: "{{ message }}"

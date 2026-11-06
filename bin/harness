@@ -3,7 +3,7 @@
 # act inside it, and only these host paths are visible:
 #
 #   markov binary          -> /usr/local/bin/markov          ro
-#   harness.yaml, scripts/ -> /harness                        ro
+#   workflow/              -> /harness                        ro  (the directory workflow)
 #   relay key              -> /run/secrets/relay-api-key      ro
 #   .state/container/      -> /state   (sessions, memory, markov.log, markov-state.db)
 #   $HARNESS_WORKDIR       -> /work    (the tools' cwd; default: the directory you run this from)
@@ -56,13 +56,12 @@ exec podman run --rm "${tty_flags[@]}" \
     --add-host "$relay_host:$relay_ip" \
     -e HOME=/tmp \
     -v "$markov:/usr/local/bin/markov:ro,z" \
-    -v "$here/harness.yaml:/harness/harness.yaml:ro,z" \
-    -v "$here/scripts:/harness/scripts:ro,z" \
+    -v "$here/workflow:/harness:ro,z" \
     -v "$key:/run/secrets/relay-api-key:ro,z" \
     -v "$state:/state:rw,z" \
     -v "$workdir:/work:rw,z" \
     -w /work \
     "$image" \
-    sh -c 'exec markov run /harness/harness.yaml --state-store /state/markov-state.db \
+    sh -c 'exec markov run /harness --state-store /state/markov-state.db \
              --callback "tty://?show=text,thinking:dim,output:lines,tool_input:count" --var state_dir=/state --var relay_key_file=/run/secrets/relay-api-key "$@" 2>>/state/markov.log' \
     harness --var "memory_dir=$memory_dir" "$@"

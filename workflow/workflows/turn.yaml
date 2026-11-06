@@ -1,0 +1,62 @@
+# One user turn: read input, record it, let the agent work. main repeats it until /exit.
+name: turn
+vars:
+  session_file: null
+  relay_api_key: null
+  request_base: null
+steps:
+  - name: user_input
+    type: prompt
+    params:
+      message: "\n>"
+    register: user_input
+
+  - name: check_quit
+    type: set_fact
+    vars:
+      quit: "user_input.value == '/exit' or user_input.value == '/quit'"
+
+  - name: user_msg
+    type: set_fact
+    when: "not quit"
+    vars:
+      message:
+        role: user
+        content: "{{ user_input.value }}"
+
+  - name: record_user
+    type: write_file
+    when: "not quit"
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ message | to_json }}\n"
+
+  - name: agent
+    workflow: agent_step
+    when: "not quit"
+    register: agent
+    vars:
+      session_file: "{{ session_file }}"
+      relay_api_key: "{{ relay_api_key }}"
+      request_base: "{{ request_base }}"
+    repeat:
+      until: "not ok or reply.stop_reason != 'tool_use'"
+      max: "{{ max_tool_rounds }}"
+      on_max: stop
+
+  - name: tool_limit
+    type: script_exec
+    when: "not quit and agent.stopped_by == 'max'"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [note, "stopped after {{ max_tool_rounds }} model calls in this turn (max_tool_rounds); the model was still asking for tools"]
+
+  - name: extract
+    workflow: extract_memories
+    when: "not quit and extract_memories"
+    vars:
+      session_file: "{{ session_file }}"
+      relay_api_key: "{{ relay_api_key }}"
+      request_base: "{{ request_base }}"

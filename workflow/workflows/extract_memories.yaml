@@ -1,0 +1,32 @@
+# Decides (deterministically) whether the turn is worth a pass, and if so writes the fork session.
+name: extract_memories
+vars:
+  session_file: null
+  relay_api_key: null
+  request_base: null
+steps:
+  - name: gate
+    type: script_exec
+    params:
+      interpreter: python3
+      path: memory.py
+      args: [fork, "{{ session_file }}", "{{ memory_dir }}", "{{ session_file }}.extract.jsonl"]
+    register: gate
+
+  - name: parse_gate
+    type: set_fact
+    vars:
+      decision: "{{ gate.stdout | from_json }}"
+
+  - name: run
+    workflow: extract_step
+    when: "decision.run"
+    vars:
+      fork_file: "{{ session_file }}.extract.jsonl"
+      context_file: "{{ session_file }}.context"
+      relay_api_key: "{{ relay_api_key }}"
+      request_base: "{{ request_base }}"
+    repeat:
+      until: "not wants_tools"
+      max: "{{ extract_max_turns }}"
+      on_max: stop

@@ -15,7 +15,33 @@ bin/harness --var approve=auto                         # run tools without askin
 bin/harness --var model=claude-sonnet-5-5
 bin/harness --var thinking_display=omitted            # hide the model's thinking (it still thinks)
 python3 tests/test_harness.py                          # end-to-end tests (pexpect, real relay, container)
+../markov/bin/static/markov validate workflow          # check the workflow without running it
 ```
+
+## Layout
+
+The harness is a markov [directory workflow](../markov/docs/reference/workflow-file.md#directory-workflow-layout) in
+`workflow/`, one file per workflow:
+
+| Path | |
+|---|---|
+| `workflow/meta.yaml` | `entrypoint: main`, and the shape of the whole thing in a comment |
+| `workflow/vars.yaml` | Settings, each overridable with `--var` (model, approval, limits, paths) |
+| `workflow/vars/prompts.yaml` | The identity line and the system prompt |
+| `workflow/vars/tools.yaml` | The tool definitions offered to the model |
+| `workflow/workflows/main.yaml` | Session setup: key, session file, memory snapshot, the shared request blocks; repeats `turn` |
+| `workflow/workflows/turn.yaml` | One user turn: prompt, record, repeat `agent_step`, memory extraction |
+| `workflow/workflows/agent_step.yaml` | One model call and the tools it asks for |
+| `workflow/workflows/extract_memories.yaml`, `extract_step.yaml` | The memory extraction pass |
+| `workflow/workflows/tool_*.yaml` | One workflow per tool (`tool_bash`, `tool_read_file`, …, `tool_unknown`) |
+| `workflow/scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`) |
+| `workflow/rules.yaml`, `step_types.yaml` | Empty; markov requires them |
+
+The workflow is its own directory, not the repo root, because markov fingerprints the whole workflow directory to detect
+edits on resume, and `.state/` changes on every run. `main`'s `request` step builds the system blocks and thinking settings
+once (`request_base`) and passes them to `agent_step` and `extract_step`, so both send the same bytes and the extraction
+pass reads the main loop's prompt cache. When the workflow was one file, a YAML anchor did this, but anchors don't reach
+across files.
 
 ## Demo
 
@@ -41,7 +67,7 @@ each mount with `:z` for SELinux:
 | Host | Container | |
 |---|---|---|
 | `../markov/bin/static/markov` | `/usr/local/bin/markov` | ro |
-| `harness.yaml`, `scripts/` | `/harness/` | ro |
+| `workflow/` | `/harness` (the directory workflow) | ro |
 | `.state/relay-api-key` | `/run/secrets/relay-api-key` | ro |
 | `.state/container/` | `/state` (sessions, memory, `markov.log`, `markov-state.db`) | rw |
 | `$HARNESS_WORKDIR` (default `$PWD`) | `/work`, the tools' cwd | rw |
@@ -61,8 +87,8 @@ project (`markov-harness`) and can be rotated or revoked from the relay admin AP
 |---|---|---|
 | `bash` | asks | Runs in `/work`; output streams to the terminal line by line (`live_output`), then `⎿ exit N` |
 | `write_file` | asks, except `.md` files in the memory dir | Create or replace a file |
-| `edit_file` | asks, after showing the diff, except `.md` files in the memory dir | Replace `old_string` with `new_string`; it must occur exactly once unless `replace_all`. `scripts/edit.py` plans the change, the diff is shown, and `apply` checks again before writing |
-| `read_file`, `glob`, `grep` | never | Read-only; several in one reply run in parallel (`concurrency: 4`), each printing its call and result together so they don't interleave. `scripts/search.py` skips `.git`, `node_modules` and the like and stops at 200 results |
+| `edit_file` | asks, after showing the diff, except `.md` files in the memory dir | Replace `old_string` with `new_string`; it must occur exactly once unless `replace_all`. `workflow/scripts/edit.py` plans the change, the diff is shown, and `apply` checks again before writing |
+| `read_file`, `glob`, `grep` | never | Read-only; several in one reply run in parallel (`concurrency: 4`), each printing its call and result together so they don't interleave. `workflow/scripts/search.py` skips `.git`, `node_modules` and the like and stops at 200 results |
 
 Read-only tools in a reply run before the ones that change things; tool calls in one reply are meant to be
 independent. Tools stream their input (`eager_input_streaming`), shown as a `… tool input: N chars` line while
@@ -78,7 +104,7 @@ A copy of Claude Code's auto-memory (2.1.319, lean prompt variant), kept in the 
   `bin/harness` passes it as `memory_dir`; `--var memory_dir=...` overrides it.
 - **Prompt:** a third system block with Claude Code's `# Memory` section: one fact per file with
   `name`/`description`/`metadata.type` frontmatter, plus a one-line pointer in `MEMORY.md`.
-- **Index:** at session start, `scripts/memory.py context` creates the dir and snapshots `MEMORY.md` (cut at 200 lines,
+- **Index:** at session start, `workflow/scripts/memory.py context` creates the dir and snapshots `MEMORY.md` (cut at 200 lines,
   then 25,000 characters, with a warning) to `<session>.context`. `history.py messages` puts it at the start of the first
   user message as a `<system-reminder>`, at request time only, so the session file stays clean. The snapshot is fixed for the
   session, so memories saved mid-session don't break the prompt cache; a resumed session takes a new one.
@@ -107,12 +133,12 @@ Not copied (yet): relevance-selected recall and periodic consolidation ("dream")
 | Loop | markov `repeat` (flat do-while loops): `main` repeats `turn` until `/exit`; `turn` repeats `agent_step` while the model asks for tools, up to `max_tool_rounds` (50) calls; the extraction pass repeats `extract_step` up to `extract_max_turns` (5) |
 | User input / tool approval | markov `prompt` step (needs a TTY) |
 | Conversation state | `/state/sessions/<run>.jsonl` (host: `.state/container/sessions/`), one message per line, appended with `write_file` |
-| Request shaping | `scripts/history.py` turns the JSONL into `messages`, merging same-role lines |
+| Request shaping | `workflow/scripts/history.py` turns the JSONL into `messages`, merging same-role lines |
 | Model call | `http_request` to `relay-api.local/v1/messages` with `stream: {format: sse, text: delta.text, thinking: delta.thinking}`; `--callback tty://` prints each text delta as it arrives, and the thinking summary dimmed before it, and `history.py assemble` rebuilds the message from the events |
 | Tools | one workflow per tool, `tool_<name>`, dispatched with `for_each` over `tool_use` blocks: read-only ones with `concurrency: 4`, then the rest one at a time |
 | Live display | `--callback "tty://?show=text,thinking:dim,output:lines,tool_input:count"`: reply text, thinking dimmed, bash output lines, and a running count of tool input |
 | Caching | top-level `cache_control: {type: ephemeral}` caches the conversation so far; the usage line shows `cache read N write N` |
-| Output | `scripts/show.py` writes to `/dev/tty`, because markov captures step stdout |
+| Output | `workflow/scripts/show.py` writes to `/dev/tty`, because markov captures step stdout |
 
 markov's own log goes to `.state/container/markov.log`. The relay key is in `.state/relay-api-key` (project
 `markov-harness`, upstream `personal-anthropic`); markov masks it in events as a secret step output.

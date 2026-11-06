@@ -1,0 +1,114 @@
+# One model call of the fork, plus its tools; extract_memories repeats it while it wants tool
+# results, up to extract_max_turns calls. Not streamed, so nothing but the "memory updated" line
+# reaches the terminal.
+name: extract_step
+vars:
+  fork_file: null
+  context_file: null
+  relay_api_key: null
+  request_base: null
+steps:
+  - name: build
+    type: script_exec
+    params:
+      interpreter: python3
+      path: history.py
+      args: [messages, "{{ fork_file }}", "{{ context_file }}"]
+    register: history
+
+  - name: call_model
+    type: http_request
+    params:
+      method: POST
+      url: "{{ relay_base_url }}/v1/messages"
+      headers:
+        x-api-key: "{{ relay_api_key }}"
+        anthropic-version: "2023-06-01"
+      ignore_status: true
+      body:
+        model: "{{ model }}"
+        max_tokens: "{{ max_tokens }}"
+        cache_control: {type: ephemeral}
+        thinking: "{{ request_base.thinking }}"
+        system: "{{ request_base.system }}"
+        tools: "{{ tools }}"     # the parent's tools, for the cache; memory.py tools enforces the limits
+        messages: "{{ history.stdout | from_json }}"
+    register: response
+
+  - name: assemble
+    type: script_exec
+    params:
+      interpreter: python3
+      path: history.py
+      args: [assemble]
+      stdin: "{{ response }}"
+    register: assembled
+
+  - name: parse_reply
+    type: set_fact
+    vars:
+      reply: "{{ assembled.stdout | from_json }}"
+
+  - name: check
+    type: set_fact
+    vars:
+      ok: "not reply.error"
+      wants_tools: "not reply.error and reply.stop_reason == 'tool_use'"
+
+  - name: show_error
+    type: script_exec
+    when: "not ok"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [memory-error, "{{ reply.status }}"]
+      stdin: "{{ reply.error }}"
+
+  - name: assistant_msg
+    type: set_fact
+    when: "ok"
+    vars:
+      message:
+        role: assistant
+        content: "{{ reply.content }}"
+
+  - name: record_assistant
+    type: write_file
+    when: "ok"
+    params:
+      path: "{{ fork_file }}"
+      append: true
+      content: "{{ message | to_json }}\n"
+
+  - name: run_tools
+    type: script_exec
+    when: "wants_tools"
+    params:
+      interpreter: python3
+      path: memory.py
+      args: [tools, "{{ memory_dir }}"]
+      stdin: "{{ reply }}"
+    register: ran
+
+  - name: parse_ran
+    type: set_fact
+    when: "wants_tools"
+    vars:
+      ran_out: "{{ ran.stdout | from_json }}"
+
+  - name: record_tools
+    type: write_file
+    when: "wants_tools"
+    params:
+      path: "{{ fork_file }}"
+      append: true
+      content: "{{ ran_out.message | to_json }}\n"
+
+  - name: show_written
+    type: script_exec
+    when: "wants_tools"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [memory]
+      stdin: "{{ ran.stdout }}"

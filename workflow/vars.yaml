@@ -1,0 +1,19 @@
+# Settings. Override any of them with --var name=value.
+relay_base_url: http://relay-api.local
+relay_key_file: .state/relay-api-key   # bin/harness passes /run/secrets/relay-api-key
+state_dir: .state                      # bin/harness passes /state
+memory_dir: .state/memory              # bin/harness passes /state/projects/<workdir key>/memory
+max_turns: 100000                      # user turns per session
+max_tool_rounds: 50                    # model calls per user turn while it keeps asking for tools
+extract_memories: true                 # run the extraction pass after each turn
+extract_max_turns: 5                   # model calls per pass, as in Claude Code
+model: claude-haiku-5-5
+max_tokens: 4096
+# The 5.x models think by default but stream it as empty text ("omitted"); "summarized" streams a
+# readable summary, which tty:// shows dimmed. "omitted" gives a silent pause instead.
+thinking_display: summarized
+session: ""          # session JSONL to resume; empty starts a new one
+approve: ask          # ask | auto
+max_tool_output: 30000
+readonly_tools: [read_file, glob, grep]       # run in parallel, no approval
+mutating_tools: [bash, write_file, edit_file]  # run one at a time, approved first

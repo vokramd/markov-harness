@@ -134,7 +134,7 @@ def test_read_of_missing_file_is_an_error_result():
 def test_bash_is_containerized():
     s = Session("--var", "approve=auto")
     s.say("Use the bash tool to run exactly this command, then reply with only: done. Command: "
-          f"pwd; id -u; test -e {HERE}/harness.yaml && echo HOST-VISIBLE || echo host-hidden; "
+          f"pwd; id -u; test -e {HERE}/README.md && echo HOST-VISIBLE || echo host-hidden; "
           "touch /usr/x 2>/dev/null && echo ROOTFS-WRITABLE || echo rootfs-readonly")
     s.exit()
     out = tool_results(s.messages())[0]["content"]

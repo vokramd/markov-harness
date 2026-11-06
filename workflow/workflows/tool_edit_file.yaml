@@ -1,0 +1,109 @@
+name: tool_edit_file
+vars:
+  block: null
+  session_file: null
+steps:
+  - name: announce
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [tool, Edit, "{{ block.input.path }}"]
+
+  # Work out the change without making it, and show it as a diff before asking.
+  - name: check
+    type: script_exec
+    params:
+      interpreter: python3
+      path: edit.py
+      args: [diff]
+      stdin: "{{ block.input }}"
+    register: check
+
+  - name: parse_plan
+    type: set_fact
+    vars:
+      plan: "{{ check.stdout | from_json }}"
+
+  - name: show_diff
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [diff]
+      stdin: "{{ check.stdout }}"
+
+  - name: memory_check
+    type: script_exec
+    params:
+      interpreter: python3
+      path: memory.py
+      args: [owns, "{{ memory_dir }}", "{{ block.input.path }}"]
+    register: memory_check
+
+  - name: in_memory
+    type: set_fact
+    vars:
+      in_memory: "memory_check.stdout == 'true'"
+
+  - name: approval
+    type: prompt
+    when: "plan.ok and approve == 'ask' and not in_memory"
+    params:
+      message: "  apply it?"
+      choices: ["y", "n"]
+      default: "y"
+      case_insensitive: true
+    register: approval
+
+  - name: decide
+    type: set_fact
+    vars:
+      approved: "plan.ok and (approve != 'ask' or in_memory or approval.value == 'y')"
+
+  - name: apply
+    type: script_exec
+    when: "approved"
+    params:
+      interpreter: python3
+      path: edit.py
+      args: [apply]
+      stdin: "{{ block.input }}"
+    register: apply
+
+  - name: parse_applied
+    type: set_fact
+    vars:
+      applied: "{% if approved %}{{ apply.stdout }}{% else %}{}{% endif %}"
+
+  - name: outcome
+    type: set_fact
+    vars:
+      done: "{{ applied | from_json }}"
+
+  - name: result
+    type: set_fact
+    vars:
+      message:
+        role: user
+        content:
+          - type: tool_result
+            tool_use_id: "{{ block.id }}"
+            is_error: "{{ not done.ok }}"
+            content: "{% if not plan.ok %}error: {{ plan.error }}{% elif not approved %}The user declined this edit.{% elif not done.ok %}error: {{ done.error }}{% else %}edited {{ block.input.path }}: replaced {{ done.count }} occurrence{{ done.count | pluralize }}{% endif %}"
+
+  - name: record
+    type: write_file
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ message | to_json }}\n"
+
+  - name: preview
+    type: script_exec
+    when: "not done.ok"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [result]
+      stdin: "{{ message }}"

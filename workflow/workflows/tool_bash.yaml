@@ -1,0 +1,83 @@
+name: tool_bash
+vars:
+  block: null
+  session_file: null
+steps:
+  - name: announce
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [tool, Bash, "{{ block.input.command }}"]
+
+  - name: approval
+    type: prompt
+    when: "approve == 'ask'"
+    params:
+      message: "  run it?"
+      choices: ["y", "n"]
+      default: "y"
+      case_insensitive: true
+    register: approval
+
+  - name: decide
+    type: set_fact
+    vars:
+      approved: "approve != 'ask' or approval.value == 'y'"
+
+  - name: run
+    type: script_exec
+    when: "approved"
+    ignore_errors: true
+    params:
+      interpreter: bash
+      content: "{{ block.input.command }}"
+      live_output: true      # each line reaches the terminal as it is written (tty:// output:lines)
+    register: run
+
+  - name: result_ok
+    type: set_fact
+    when: "approved"
+    vars:
+      message:
+        role: user
+        content:
+          - type: tool_result
+            tool_use_id: "{{ block.id }}"
+            content: "{{ run.stdout | truncatechars:max_tool_output }}{{ run.stderr | truncatechars:max_tool_output }}\n[exit code {{ run.exit_code }}]"
+
+  - name: result_denied
+    type: set_fact
+    when: "not approved"
+    vars:
+      message:
+        role: user
+        content:
+          - type: tool_result
+            tool_use_id: "{{ block.id }}"
+            is_error: true
+            content: "The user declined to run this command."
+
+  - name: record
+    type: write_file
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ message | to_json }}\n"
+
+  - name: show_exit
+    type: script_exec
+    when: "approved"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [exit, "{{ run.exit_code }}"]
+
+  - name: show_denied
+    type: script_exec
+    when: "not approved"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [result]
+      stdin: "{{ message }}"

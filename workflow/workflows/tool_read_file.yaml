@@ -1,0 +1,40 @@
+name: tool_read_file
+vars:
+  block: null
+  session_file: null
+steps:
+  - name: read
+    type: script_exec
+    ignore_errors: true
+    params:
+      interpreter: python3
+      path: search.py
+      args: [read]
+      stdin: "{{ block.input }}"
+    register: read
+
+  - name: result
+    type: set_fact
+    vars:
+      message:
+        role: user
+        content:
+          - type: tool_result
+            tool_use_id: "{{ block.id }}"
+            is_error: "{{ read.exit_code != 0 }}"
+            content: "{% if read.exit_code != 0 %}{{ read.stdout | truncatechars:2000 }}{% else %}{{ read.stdout | truncatechars:max_tool_output }}{% endif %}"
+
+  - name: record
+    type: write_file
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ message | to_json }}\n"
+
+  - name: show
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [call, Read, "{{ block.input.path }}"]
+      stdin: "{{ message }}"

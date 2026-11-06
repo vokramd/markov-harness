@@ -1,0 +1,73 @@
+name: tool_write_file
+vars:
+  block: null
+  session_file: null
+steps:
+  - name: announce
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [tool, Write, "{{ block.input.path }}"]
+
+  - name: memory_check
+    type: script_exec
+    params:
+      interpreter: python3
+      path: memory.py
+      args: [owns, "{{ memory_dir }}", "{{ block.input.path }}"]
+    register: memory_check
+
+  - name: in_memory
+    type: set_fact
+    vars:
+      in_memory: "memory_check.stdout == 'true'"
+
+  - name: approval
+    type: prompt
+    when: "approve == 'ask' and not in_memory"
+    params:
+      message: "  write it?"
+      choices: ["y", "n"]
+      default: "y"
+      case_insensitive: true
+    register: approval
+
+  - name: decide
+    type: set_fact
+    vars:
+      approved: "approve != 'ask' or in_memory or approval.value == 'y'"
+
+  - name: write
+    type: write_file
+    when: "approved"
+    ignore_errors: true
+    params:
+      path: "{{ block.input.path }}"
+      content: "{{ block.input.content }}"
+    register: written
+
+  - name: result
+    type: set_fact
+    vars:
+      message:
+        role: user
+        content:
+          - type: tool_result
+            tool_use_id: "{{ block.id }}"
+            content: "{% if not approved %}The user declined this write.{% elif written.failed %}error: {{ written.error }}{% else %}wrote {{ written.bytes }} bytes to {{ written.path }}{% endif %}"
+
+  - name: record
+    type: write_file
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ message | to_json }}\n"
+
+  - name: preview
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [result]
+      stdin: "{{ message }}"
