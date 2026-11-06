@@ -32,14 +32,14 @@ The harness is a markov [directory workflow](../markov/docs/reference/workflow-f
 | `workflow/workflows/main.yaml` | Session setup: key, session file, memory snapshot, the shared request blocks; repeats `turn` |
 | `workflow/workflows/turn.yaml` | One user turn: prompt, record, repeat `agent_step`, memory extraction |
 | `workflow/workflows/agent_step.yaml` | One model call and the tools it asks for |
-| `workflow/workflows/extract_memories.yaml`, `extract_step.yaml` | The memory extraction pass |
+| `workflow/workflows/extract/memories.yaml`, `extract/step.yaml` | The memory extraction pass: `extract.memories`, `extract.step` |
 | `workflow/workflows/tools/*.yaml` | One workflow per tool, named by its path: `tools.bash`, `tools.read_file`, …, `tools.unknown` |
 | `workflow/scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`) |
 | `workflow/rules.yaml`, `step_types.yaml` | Empty; markov requires them |
 
 The workflow is its own directory, not the repo root, because markov fingerprints the whole workflow directory to detect
 edits on resume, and `.state/` changes on every run. `main`'s `request` step builds the system blocks and thinking settings
-once (`request_base`) and passes them to `agent_step` and `extract_step`, so both send the same bytes and the extraction
+once (`request_base`) and passes them to `agent_step` and `extract.step`, so both send the same bytes and the extraction
 pass reads the main loop's prompt cache. When the workflow was one file, a YAML anchor did this, but anchors don't reach
 across files.
 
@@ -110,9 +110,9 @@ A copy of Claude Code's auto-memory (2.1.319, lean prompt variant), kept in the 
   session, so memories saved mid-session don't break the prompt cache; a resumed session takes a new one.
 - **Writes:** the model uses `write_file`/`edit_file`; `memory.py owns` lets `.md` files inside the memory dir skip
   the approval prompt.
-- **Extraction:** after each turn, `extract_memories` decides with `memory.py fork` whether the turn gets a pass. It
+- **Extraction:** after each turn, `extract.memories` decides with `memory.py fork` whether the turn gets a pass. It
   does when the turn finished, its user message has at least 3 words, and the main agent didn't already write memory
-  in it. The pass then runs `extract_step` on a fork, `<session>.jsonl.extract.jsonl`: the parent's messages plus Claude
+  in it. The pass then runs `extract.step` on a fork, `<session>.jsonl.extract.jsonl`: the parent's messages plus Claude
   Code's extraction prompt, with the existing memory files listed. That file is rewritten on each pass.
   - **Request:** the same system blocks (YAML anchors), tools, thinking and model as the main loop, so it reads the
     parent's prompt cache. It isn't streamed, so only a dim `✻ memory updated: …` line shows.
@@ -130,7 +130,7 @@ Not copied (yet): relevance-selected recall and periodic consolidation ("dream")
 
 | Piece | Where |
 |---|---|
-| Loop | markov `repeat` (flat do-while loops): `main` repeats `turn` until `/exit`; `turn` repeats `agent_step` while the model asks for tools, up to `max_tool_rounds` (50) calls; the extraction pass repeats `extract_step` up to `extract_max_turns` (5) |
+| Loop | markov `repeat` (flat do-while loops): `main` repeats `turn` until `/exit`; `turn` repeats `agent_step` while the model asks for tools, up to `max_tool_rounds` (50) calls; the extraction pass repeats `extract.step` up to `extract_max_turns` (5) |
 | User input / tool approval | markov `prompt` step (needs a TTY) |
 | Conversation state | `/state/sessions/<run>.jsonl` (host: `.state/container/sessions/`), one message per line, appended with `write_file` |
 | Request shaping | `workflow/scripts/history.py` turns the JSONL into `messages`, merging same-role lines |

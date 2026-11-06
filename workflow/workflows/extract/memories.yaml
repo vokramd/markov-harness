@@ -1,5 +1,5 @@
 # Decides (deterministically) whether the turn is worth a pass, and if so writes the fork session.
-name: extract_memories
+name: extract.memories
 vars:
   session_file: null
   relay_api_key: null
@@ -19,7 +19,7 @@ steps:
       decision: "{{ gate.stdout | from_json }}"
 
   - name: run
-    workflow: extract_step
+    workflow: extract.step
     when: "decision.run"
     vars:
       fork_file: "{{ session_file }}.extract.jsonl"

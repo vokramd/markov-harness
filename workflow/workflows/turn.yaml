@@ -54,7 +54,7 @@ steps:
       args: [note, "stopped after {{ max_tool_rounds }} model calls in this turn (max_tool_rounds); the model was still asking for tools"]
 
   - name: extract
-    workflow: extract_memories
+    workflow: extract.memories
     when: "not quit and extract_memories"
     vars:
       session_file: "{{ session_file }}"

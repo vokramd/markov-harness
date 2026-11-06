@@ -21,7 +21,7 @@ steps:
       args: [context, "{{ memory_dir }}", "{{ session_path }}.context"]
 
   # The system blocks and thinking settings every model call sends. Built once here, so
-  # agent_step and extract_step send the same bytes and the extraction pass reads the main
+  # agent_step and extract.step send the same bytes and the extraction pass reads the main
   # loop's prompt cache. (A YAML anchor did this when the workflow was one file.)
   - name: request
     type: set_fact

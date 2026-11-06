@@ -42,7 +42,7 @@ steps:
         stream: true
         cache_control: {type: ephemeral}   # cache the conversation so far for the next call
         thinking: "{{ request_base.thinking }}"
-        system: "{{ request_base.system }}"   # built once in main (step request), shared with extract_step
+        system: "{{ request_base.system }}"   # built once in main (step request), shared with extract.step
         tools: "{{ tools }}"
         messages: "{{ history.stdout | from_json }}"
     register: response

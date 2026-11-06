@@ -1,7 +1,7 @@
-# One model call of the fork, plus its tools; extract_memories repeats it while it wants tool
+# One model call of the fork, plus its tools; extract.memories repeats it while it wants tool
 # results, up to extract_max_turns calls. Not streamed, so nothing but the "memory updated" line
 # reaches the terminal.
-name: extract_step
+name: extract.step
 vars:
   fork_file: null
   context_file: null

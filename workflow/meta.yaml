@@ -13,7 +13,7 @@
 #   at a time, each asking first unless approve=auto.
 #   Memory: files in memory_dir persist across sessions; its MEMORY.md index is snapshotted at session
 #   start and put in the first user message, and writes/edits of .md files there need no approval.
-#   After each turn, extract_memories forks the conversation with Claude Code's extraction prompt and
+#   After each turn, extract.memories forks the conversation with Claude Code's extraction prompt and
 #   lets the model save what is worth keeping (scripts/memory.py runs its tools, limited to memory_dir).
 #
 # All conversation state lives in the session file (one message per line); workflows pass only its path.
