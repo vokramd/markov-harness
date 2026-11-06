@@ -135,12 +135,15 @@ def test_bash_is_containerized():
     s = Session("--var", "approve=auto")
     s.say("Use the bash tool to run exactly this command, then reply with only: done. Command: "
           f"pwd; id -u; test -e {HERE}/README.md && echo HOST-VISIBLE || echo host-hidden; "
-          "touch /usr/x 2>/dev/null && echo ROOTFS-WRITABLE || echo rootfs-readonly")
+          "touch /usr/x 2>/dev/null && echo ROOTFS-WRITABLE || echo rootfs-readonly; "
+          "echo harness: $(ls -A /harness)")
     s.exit()
     out = tool_results(s.messages())[0]["content"]
     assert out.splitlines()[0] == "/work", out
     assert str(os.getuid()) in out, out          # --userns=keep-id: files in /work stay the user's
     assert "host-hidden" in out and "rootfs-readonly" in out, out
+    # Only the workflow files are mounted: markov fingerprints /harness, and .state/ changes every run.
+    assert "harness: meta.yaml rules.yaml scripts step_types.yaml vars vars.yaml workflows" in out, out
 
 
 def test_reply_streams():
