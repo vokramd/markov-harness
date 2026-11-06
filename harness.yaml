@@ -37,7 +37,6 @@ vars:
   session: ""          # session JSONL to resume; empty starts a new one
   approve: ask          # ask | auto
   max_tool_output: 30000
-  nl: "\n"             # used as {{ nl }}: a literal trailing \n after one {{ expr }} is trimmed away
   readonly_tools: [read_file, glob, grep]       # run in parallel, no approval
   mutating_tools: [bash, write_file, edit_file]  # run one at a time, approved first
   # Upstream subscription (OAuth) accounts only serve newer models (e.g. claude-haiku-5-5) when the
@@ -184,7 +183,7 @@ workflows:
         params:
           path: "{{ session_file }}"
           append: true
-          content: "{{ message | to_json }}{{ nl }}"
+          content: "{{ message | to_json }}\n"
 
       - name: agent
         workflow: agent_step
@@ -336,7 +335,7 @@ workflows:
         params:
           path: "{{ session_file }}"
           append: true
-          content: "{{ message | to_json }}{{ nl }}"
+          content: "{{ message | to_json }}\n"
 
       - name: show_reply
         type: script_exec
@@ -492,7 +491,7 @@ workflows:
         params:
           path: "{{ fork_file }}"
           append: true
-          content: "{{ message | to_json }}{{ nl }}"
+          content: "{{ message | to_json }}\n"
 
       - name: run_tools
         type: script_exec
@@ -516,7 +515,7 @@ workflows:
         params:
           path: "{{ fork_file }}"
           append: true
-          content: "{{ ran_out.message | to_json }}{{ nl }}"
+          content: "{{ ran_out.message | to_json }}\n"
 
       - name: show_written
         type: script_exec
@@ -594,7 +593,7 @@ workflows:
         params:
           path: "{{ session_file }}"
           append: true
-          content: "{{ message | to_json }}{{ nl }}"
+          content: "{{ message | to_json }}\n"
 
       - name: show_exit
         type: script_exec
@@ -644,7 +643,7 @@ workflows:
         params:
           path: "{{ session_file }}"
           append: true
-          content: "{{ message | to_json }}{{ nl }}"
+          content: "{{ message | to_json }}\n"
 
       - name: show
         type: script_exec
@@ -684,7 +683,7 @@ workflows:
         params:
           path: "{{ session_file }}"
           append: true
-          content: "{{ message | to_json }}{{ nl }}"
+          content: "{{ message | to_json }}\n"
 
       - name: show
         type: script_exec
@@ -724,7 +723,7 @@ workflows:
         params:
           path: "{{ session_file }}"
           append: true
-          content: "{{ message | to_json }}{{ nl }}"
+          content: "{{ message | to_json }}\n"
 
       - name: show
         type: script_exec
@@ -798,7 +797,7 @@ workflows:
         params:
           path: "{{ session_file }}"
           append: true
-          content: "{{ message | to_json }}{{ nl }}"
+          content: "{{ message | to_json }}\n"
 
       - name: preview
         type: script_exec
@@ -907,7 +906,7 @@ workflows:
         params:
           path: "{{ session_file }}"
           append: true
-          content: "{{ message | to_json }}{{ nl }}"
+          content: "{{ message | to_json }}\n"
 
       - name: preview
         type: script_exec
@@ -940,7 +939,7 @@ workflows:
         params:
           path: "{{ session_file }}"
           append: true
-          content: "{{ message | to_json }}{{ nl }}"
+          content: "{{ message | to_json }}\n"
 
       - name: preview
         type: script_exec

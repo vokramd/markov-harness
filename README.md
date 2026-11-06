@@ -120,8 +120,8 @@ markov's own log goes to `.state/container/markov.log`. The relay key is in `.st
 ## Markov findings
 
 - `prompt` requires a TTY, so this can't run inside markov-ide (it gives runs `stdin: null`).
-- A literal suffix after a single `{{ expr }}` is trimmed (`"{{ x | to_json }}\n"` loses the `\n`),
-  because `exactExpression` trims before matching. Workaround: `{{ nl }}`.
+- Whitespace after a single `{{ expr }}` used to be trimmed (`"{{ x | to_json }}\n"` lost the `\n`),
+  because `exactExpression` trimmed before matching. Fixed in markov; the `{{ nl }}` workaround is gone.
 - The template docs list `truncate`; pongo2's filter is `truncatechars`. `markov validate` doesn't
   catch unknown filters.
 - No map literals in templates; build records with `set_fact` maps instead.
