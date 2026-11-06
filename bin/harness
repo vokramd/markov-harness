@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Run the harness in a rootless podman container. The model's tools (bash, read_file, write_file)
+# act inside it, and only these host paths are visible:
+#
+#   markov binary          -> /usr/local/bin/markov          ro
+#   harness.yaml, scripts/ -> /harness                        ro
+#   relay key              -> /run/secrets/relay-api-key      ro
+#   .state/container/      -> /state   (sessions, memory, markov.log, markov-state.db)
+#   $HARNESS_WORKDIR       -> /work    (the tools' cwd; default: the directory you run this from)
+#
+# Every mount gets :z so SELinux-enforcing hosts relabel it for container access.
+#
+#   bin/harness [--var k=v ...]
+#   HARNESS_WORKDIR=~/src/project bin/harness
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+markov="$(realpath "${MARKOV:-$here/../markov/bin/static/markov}")"   # CGO_ENABLED=0: make -C ../markov build-static
+image="${HARNESS_IMAGE:-localhost/markov-harness:1}"
+workdir="$(realpath "${HARNESS_WORKDIR:-$PWD}")"
+state="$here/.state/container"
+key="$here/.state/relay-api-key"
+relay_host="relay-api.local"
+# One memory dir per work dir, keyed like Claude Code's projects/<key>/memory: every non-alphanumeric -> '-'.
+memory_dir="/state/projects/$(printf '%s' "$workdir" | sed 's/[^A-Za-z0-9]/-/g')/memory"
+
+# :z relabels what it mounts; refuse directories where that (or exposing them to tools) is a bad idea.
+case "$workdir" in
+    / | "$HOME" | /home | /usr* | /etc* | /var | /root)
+        echo "harness: refusing to mount $workdir as the tool work dir; set HARNESS_WORKDIR to a project dir" >&2
+        exit 2 ;;
+esac
+[ -r "$key" ] || { echo "harness: missing relay key at $key" >&2; exit 2; }
+relay_ip="$(getent ahostsv4 "$relay_host" | awk 'NR==1 {print $1}')"
+[ -n "$relay_ip" ] || { echo "harness: cannot resolve $relay_host" >&2; exit 2; }
+# With rootless pasta networking the container gets a copy of the host's address, so a relay running
+# on this host is unreachable at that address from inside; podman's host-gateway reaches the host.
+if ip -4 -o addr show | awk '{split($4, a, "/"); print a[1]}' | grep -qxF "$relay_ip"; then
+    relay_ip=host-gateway
+fi
+
+if ! podman image exists "$image"; then
+    echo "harness: building $image ..." >&2
+    podman build -q -t "$image" -f "$here/container/Containerfile" "$here/container" >&2
+fi
+
+mkdir -p "$state/sessions"
+tty_flags=(-i)
+[ -t 0 ] && tty_flags=(-it)
+
+exec podman run --rm "${tty_flags[@]}" \
+    --userns=keep-id \
+    --cap-drop=all --security-opt=no-new-privileges \
+    --read-only --tmpfs /tmp:rw,size=256m \
+    --memory=2g --pids-limit=512 \
+    --add-host "$relay_host:$relay_ip" \
+    -e HOME=/tmp \
+    -v "$markov:/usr/local/bin/markov:ro,z" \
+    -v "$here/harness.yaml:/harness/harness.yaml:ro,z" \
+    -v "$here/scripts:/harness/scripts:ro,z" \
+    -v "$key:/run/secrets/relay-api-key:ro,z" \
+    -v "$state:/state:rw,z" \
+    -v "$workdir:/work:rw,z" \
+    -w /work \
+    "$image" \
+    sh -c 'exec markov run /harness/harness.yaml --state-store /state/markov-state.db \
+             --callback "tty://?show=text,thinking:dim,output:lines,tool_input:count" --var state_dir=/state --var relay_key_file=/run/secrets/relay-api-key "$@" 2>>/state/markov.log' \
+    harness --var "memory_dir=$memory_dir" "$@"

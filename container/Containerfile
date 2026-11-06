@@ -1,0 +1,11 @@
+# Runtime for markov-harness. Nothing from the harness is baked in: the markov binary, the workflow,
+# its scripts, the state dir, the relay key and the tool work dir are all bind-mounted by bin/harness.
+# markov is mounted as a static (CGO_ENABLED=0) binary, so the base image doesn't matter to it;
+# Fedora is for the tools the model runs (bash, python3, coreutils, git).
+FROM registry.fedoraproject.org/fedora-minimal:44
+
+RUN microdnf -y install --setopt=install_weak_deps=0 \
+        python3 bash coreutils findutils grep sed gawk diffutils git-core which less file procps-ng \
+    && microdnf clean all
+
+WORKDIR /work

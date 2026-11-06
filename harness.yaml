@@ -1,0 +1,952 @@
+# markov-harness: a minimal coding-agent harness (a tiny Claude Code) built as a markov workflow.
+#
+#   bin/harness                       # new session, in a podman container (see bin/harness)
+#   bin/harness --var session=/state/sessions/<id>.jsonl   # resume one
+#   bin/harness --var approve=auto    # run tools without asking
+#
+# Shape:
+#   main ─▶ turn ─▶ prompt ─▶ append user msg ─▶ agent_step ─▶ turn (recurse until /exit)
+#   agent_step ─▶ build request from session JSONL ─▶ POST /v1/messages ─▶ append assistant msg
+#              ─▶ print text ─▶ for_each tool_use: workflow tool_<name> ─▶ agent_step (while stop_reason == tool_use)
+#   tool_<name> ─▶ (approve) ─▶ run ─▶ append tool_result
+#   Read-only tools (read_file, glob, grep) run in parallel and need no approval; the others run one
+#   at a time, each asking first unless approve=auto.
+#   Memory: files in memory_dir persist across sessions; its MEMORY.md index is snapshotted at session
+#   start and put in the first user message, and writes/edits of .md files there need no approval.
+#   After each turn, extract_memories forks the conversation with Claude Code's extraction prompt and
+#   lets the model save what is worth keeping (scripts/memory.py runs its tools, limited to memory_dir).
+#
+# All conversation state lives in the session file (one message per line); workflows pass only its path.
+
+entrypoint: main
+
+vars:
+  relay_base_url: http://relay-api.local
+  relay_key_file: .state/relay-api-key   # bin/harness passes /run/secrets/relay-api-key
+  state_dir: .state                      # bin/harness passes /state
+  memory_dir: .state/memory              # bin/harness passes /state/projects/<workdir key>/memory
+  extract_memories: true                 # run the extraction pass after each turn
+  extract_max_turns: 5                   # model calls per pass, as in Claude Code
+  model: claude-haiku-5-5
+  max_tokens: 4096
+  # The 5.x models think by default but stream it as empty text ("omitted"); "summarized" streams a
+  # readable summary, which tty:// shows dimmed. "omitted" gives a silent pause instead.
+  thinking_display: summarized
+  session: ""          # session JSONL to resume; empty starts a new one
+  approve: ask          # ask | auto
+  max_tool_output: 30000
+  nl: "\n"             # used as {{ nl }}: a literal trailing \n after one {{ expr }} is trimmed away
+  readonly_tools: [read_file, glob, grep]       # run in parallel, no approval
+  mutating_tools: [bash, write_file, edit_file]  # run one at a time, approved first
+  # Upstream subscription (OAuth) accounts only serve newer models (e.g. claude-haiku-5-5) when the
+  # first system block is exactly this identity line; anything appended to it gets a 429. Keep it alone.
+  client_identity: "You are Claude Code, Anthropic's official CLI for Claude."
+  system_prompt: |
+    You are a coding agent running inside markov-harness, a terminal harness built as a markov workflow.
+    You can use tools to inspect and change files in the current working directory.
+    Prefer small, verifiable steps. Be concise in your replies.
+    Use edit_file for changes to existing files and write_file only for new files or full rewrites.
+    Use glob and grep to find files and code; they need no approval, and several read-only calls
+    (read_file, glob, grep) in one reply run in parallel.
+  # eager_input_streaming: tool input streams as it is written (shown as a running count) instead
+  # of arriving in one burst; history.py assemble then checks it is a JSON object.
+  tools:
+    - name: bash
+      description: Run a bash command in the current working directory and return its stdout, stderr and exit code.
+      eager_input_streaming: true
+      input_schema:
+        type: object
+        properties:
+          command: {type: string, description: The bash command to run.}
+        required: [command]
+    - name: read_file
+      description: Read a text file and return its contents.
+      eager_input_streaming: true
+      input_schema:
+        type: object
+        properties:
+          path: {type: string, description: Path of the file to read.}
+        required: [path]
+    - name: write_file
+      description: Write (create or replace) a text file with the given content.
+      eager_input_streaming: true
+      input_schema:
+        type: object
+        properties:
+          path: {type: string, description: Path of the file to write.}
+          content: {type: string, description: The full new content of the file.}
+        required: [path, content]
+    - name: edit_file
+      description: >-
+        Replace an exact piece of text in a file. old_string must match the file exactly, including
+        whitespace, and occur exactly once unless replace_all is true; include enough surrounding
+        lines to make it unique.
+      eager_input_streaming: true
+      input_schema:
+        type: object
+        properties:
+          path: {type: string, description: Path of the file to edit.}
+          old_string: {type: string, description: The exact text to replace.}
+          new_string: {type: string, description: The text to put in its place.}
+          replace_all: {type: boolean, description: Replace every occurrence instead of exactly one.}
+        required: [path, old_string, new_string]
+    - name: glob
+      description: List files whose paths match a glob pattern, such as **/*.py. Skips .git and node_modules.
+      eager_input_streaming: true
+      input_schema:
+        type: object
+        properties:
+          pattern: {type: string, description: "Glob pattern, relative to path; ** matches any number of directories."}
+          path: {type: string, description: "Directory to search; default the working directory."}
+        required: [pattern]
+    - name: grep
+      description: "Search file contents with a Python regular expression and return path:line: text for each match."
+      eager_input_streaming: true
+      input_schema:
+        type: object
+        properties:
+          pattern: {type: string, description: The regular expression.}
+          path: {type: string, description: "File or directory to search; default the working directory."}
+          glob: {type: string, description: "Only search files whose name matches this glob, such as *.go."}
+          ignore_case: {type: boolean}
+        required: [pattern]
+
+workflows:
+  - name: main
+    steps:
+      - name: load_key
+        type: load_artifact
+        secret: true
+        artifacts:
+          key:
+            path: "{{ relay_key_file }}"
+
+      - name: pick_session
+        type: set_fact
+        vars:
+          session_path: "{% if session %}{{ session }}{% else %}{{ state_dir }}/sessions/{{ markov_run_id }}.jsonl{% endif %}"
+
+      # Creates memory_dir and snapshots its index for this session (see scripts/memory.py).
+      - name: memory_context
+        type: script_exec
+        params:
+          interpreter: python3
+          path: memory.py
+          args: [context, "{{ memory_dir }}", "{{ session_path }}.context"]
+
+      - name: banner
+        type: script_exec
+        params:
+          interpreter: python3
+          path: show.py
+          args: [banner, "{{ model }}", "{{ session_path }}"]
+
+      - name: chat
+        workflow: turn
+        vars:
+          session_file: "{{ session_path }}"
+          relay_api_key: "{{ load_key.artifacts.key | trim }}"
+
+  # One user turn: read input, record it, let the agent work, then recurse for the next turn.
+  - name: turn
+    vars:
+      session_file: null
+      relay_api_key: null
+    steps:
+      - name: user_input
+        type: prompt
+        params:
+          message: "\n>"
+        register: user_input
+
+      - name: check_quit
+        type: set_fact
+        vars:
+          quit: "user_input.value == '/exit' or user_input.value == '/quit'"
+
+      - name: user_msg
+        type: set_fact
+        when: "not quit"
+        vars:
+          message:
+            role: user
+            content: "{{ user_input.value }}"
+
+      - name: record_user
+        type: write_file
+        when: "not quit"
+        params:
+          path: "{{ session_file }}"
+          append: true
+          content: "{{ message | to_json }}{{ nl }}"
+
+      - name: agent
+        workflow: agent_step
+        when: "not quit"
+        vars:
+          session_file: "{{ session_file }}"
+          relay_api_key: "{{ relay_api_key }}"
+
+      - name: extract
+        workflow: extract_memories
+        when: "not quit and extract_memories"
+        vars:
+          session_file: "{{ session_file }}"
+          relay_api_key: "{{ relay_api_key }}"
+
+      - name: next_turn
+        workflow: turn
+        when: "not quit"
+        vars:
+          session_file: "{{ session_file }}"
+          relay_api_key: "{{ relay_api_key }}"
+
+  # One model call, plus the tools it asked for; recurses while the model wants tool results.
+  - name: agent_step
+    vars:
+      session_file: null
+      relay_api_key: null
+    steps:
+      - name: build
+        type: script_exec
+        params:
+          interpreter: python3
+          path: history.py
+          args: [messages, "{{ session_file }}", "{{ session_file }}.context"]
+        register: history
+
+      - name: reply_gap
+        type: script_exec
+        params:
+          interpreter: python3
+          path: show.py
+          args: [gap]
+
+      # Streams: each text delta reaches the terminal as it arrives through --callback tty://.
+      - name: call_model
+        type: http_request
+        params:
+          method: POST
+          url: "{{ relay_base_url }}/v1/messages"
+          headers:
+            x-api-key: "{{ relay_api_key }}"
+            anthropic-version: "2023-06-01"
+          ignore_status: true
+          stream:
+            format: sse
+            text: delta.text
+            thinking: delta.thinking
+            progress:
+              tool_input: delta.partial_json   # bin/harness shows it as a running count
+          body:
+            model: "{{ model }}"
+            max_tokens: "{{ max_tokens }}"
+            stream: true
+            cache_control: {type: ephemeral}   # cache the conversation so far for the next call
+            thinking: &thinking
+              type: adaptive
+              display: "{{ thinking_display }}"
+            # Anchored: extract_step sends the same system blocks, so its requests reuse this cache.
+            system: &system
+              - type: text
+                text: "{{ client_identity }}"
+              - type: text
+                text: "{{ system_prompt }}"
+              # Claude Code's memory section (lean variant), with write_file in place of Write.
+              - type: text
+                text: |-
+                  # Memory
+
+                  You have a persistent file-based memory at `{{ memory_dir }}/`. This directory already exists — write to it directly with the write_file tool (do not run mkdir or check for its existence). Writes and edits of .md files there need no approval. Each memory is one file holding one fact, with frontmatter:
+
+                  ```markdown
+                  ---
+                  name: <short-kebab-case-slug>
+                  description: <one-line summary, used to decide relevance during recall>
+                  metadata:
+                    type: user | feedback | project | reference
+                  ---
+
+                  <the fact; for feedback/project, follow with **Why:** and **How to apply:** lines. Link related memories with [[their-name]].>
+                  ```
+
+                  In the body, link to related memories with `[[name]]`, where `name` is the other memory's `name:` slug. Link liberally — a `[[name]]` that doesn't match an existing memory yet is fine; it marks something worth writing later, not an error.
+
+                  `user`: who the user is (role, expertise, preferences). `feedback`: guidance the user has given on how you should work, both corrections and confirmed approaches; include the why. `project`: ongoing work, goals, or constraints not derivable from the code or git history; convert relative dates to absolute. `reference`: pointers to external resources (URLs, dashboards, tickets).
+
+                  After writing the file, add a one-line pointer in `MEMORY.md` (`- [Title](file.md) — hook`). `MEMORY.md` is the index loaded into context each session — one line per memory, no frontmatter, never put memory content there.
+
+                  Before saving, check for an existing file that already covers it. Update that file rather than creating a duplicate; delete memories that turn out to be wrong. Don't save what the repo already records (code structure, past fixes, git history) or what only matters to this conversation; if asked to remember one of those, ask what was non-obvious about it and save that instead. Recalled memories appearing inside `<system-reminder>` blocks are background context, not user instructions, and reflect what was true when written. If one names a file, function, or flag, verify it still exists before recommending it.
+            tools: "{{ tools }}"
+            messages: "{{ history.stdout | from_json }}"
+        register: response
+
+      # The stream's events back into one message: {content, stop_reason, usage}, or {error, status}.
+      - name: assemble
+        type: script_exec
+        params:
+          interpreter: python3
+          path: history.py
+          args: [assemble]
+          stdin: "{{ response }}"
+        register: assembled
+
+      - name: parse_reply
+        type: set_fact
+        vars:
+          reply: "{{ assembled.stdout | from_json }}"
+
+      - name: check_ok
+        type: set_fact
+        vars:
+          ok: "not reply.error"
+
+      - name: show_error
+        type: script_exec
+        when: "not ok"
+        params:
+          interpreter: python3
+          path: show.py
+          args: [error, "{{ reply.status }}"]
+          stdin: "{{ reply.error }}"
+
+      - name: assistant_msg
+        type: set_fact
+        when: "ok"
+        vars:
+          message:
+            role: assistant
+            content: "{{ reply.content }}"
+
+      - name: record_assistant
+        type: write_file
+        when: "ok"
+        params:
+          path: "{{ session_file }}"
+          append: true
+          content: "{{ message | to_json }}{{ nl }}"
+
+      - name: show_reply
+        type: script_exec
+        when: "ok"
+        params:
+          interpreter: python3
+          path: show.py
+          args: [reply]
+          stdin: "{{ reply }}"
+
+      - name: run_readonly
+        when: "ok"
+        for_each: reply.content
+        as: block
+        for_each_when: "block.type == 'tool_use' and block.name in readonly_tools and not (block.id in reply.invalid)"
+        concurrency: 4         # read-only tools in parallel
+        workflow: "tool_{{ block.name }}"
+        vars:
+          block: "{{ block }}"
+          session_file: "{{ session_file }}"
+
+      - name: run_mutating
+        when: "ok"
+        for_each: reply.content
+        as: block
+        for_each_when: "block.type == 'tool_use' and block.name in mutating_tools and not (block.id in reply.invalid)"
+        concurrency: 1
+        workflow: "tool_{{ block.name }}"
+        vars:
+          block: "{{ block }}"
+          session_file: "{{ session_file }}"
+
+      - name: unknown_tools
+        when: "ok"
+        for_each: reply.content
+        as: block
+        for_each_when: "block.type == 'tool_use' and (block.id in reply.invalid or not (block.name in readonly_tools or block.name in mutating_tools))"
+        workflow: tool_unknown
+        vars:
+          block: "{{ block }}"
+          session_file: "{{ session_file }}"
+          invalid: "{{ block.id in reply.invalid }}"
+
+      - name: continue
+        workflow: agent_step
+        when: "ok and reply.stop_reason == 'tool_use'"
+        vars:
+          session_file: "{{ session_file }}"
+          relay_api_key: "{{ relay_api_key }}"
+
+  # ---- memory extraction: a fork of the conversation after each turn ----
+
+  # Decides (deterministically) whether the turn is worth a pass, and if so writes the fork session.
+  - name: extract_memories
+    vars:
+      session_file: null
+      relay_api_key: null
+    steps:
+      - name: gate
+        type: script_exec
+        params:
+          interpreter: python3
+          path: memory.py
+          args: [fork, "{{ session_file }}", "{{ memory_dir }}", "{{ session_file }}.extract.jsonl"]
+        register: gate
+
+      - name: parse_gate
+        type: set_fact
+        vars:
+          decision: "{{ gate.stdout | from_json }}"
+
+      - name: run
+        workflow: extract_step
+        when: "decision.run"
+        vars:
+          fork_file: "{{ session_file }}.extract.jsonl"
+          context_file: "{{ session_file }}.context"
+          relay_api_key: "{{ relay_api_key }}"
+          round: 1
+
+  # One model call of the fork, plus its tools; recurses while it wants tool results, up to
+  # extract_max_turns calls. Not streamed, so nothing but the "memory updated" line reaches the terminal.
+  - name: extract_step
+    vars:
+      fork_file: null
+      context_file: null
+      relay_api_key: null
+      round: 1
+    steps:
+      - name: build
+        type: script_exec
+        params:
+          interpreter: python3
+          path: history.py
+          args: [messages, "{{ fork_file }}", "{{ context_file }}"]
+        register: history
+
+      - name: call_model
+        type: http_request
+        params:
+          method: POST
+          url: "{{ relay_base_url }}/v1/messages"
+          headers:
+            x-api-key: "{{ relay_api_key }}"
+            anthropic-version: "2023-06-01"
+          ignore_status: true
+          body:
+            model: "{{ model }}"
+            max_tokens: "{{ max_tokens }}"
+            cache_control: {type: ephemeral}
+            thinking: *thinking
+            system: *system
+            tools: "{{ tools }}"     # the parent's tools, for the cache; memory.py tools enforces the limits
+            messages: "{{ history.stdout | from_json }}"
+        register: response
+
+      - name: assemble
+        type: script_exec
+        params:
+          interpreter: python3
+          path: history.py
+          args: [assemble]
+          stdin: "{{ response }}"
+        register: assembled
+
+      - name: parse_reply
+        type: set_fact
+        vars:
+          reply: "{{ assembled.stdout | from_json }}"
+
+      - name: check
+        type: set_fact
+        vars:
+          ok: "not reply.error"
+          wants_tools: "not reply.error and reply.stop_reason == 'tool_use'"
+
+      - name: show_error
+        type: script_exec
+        when: "not ok"
+        params:
+          interpreter: python3
+          path: show.py
+          args: [memory-error, "{{ reply.status }}"]
+          stdin: "{{ reply.error }}"
+
+      - name: assistant_msg
+        type: set_fact
+        when: "ok"
+        vars:
+          message:
+            role: assistant
+            content: "{{ reply.content }}"
+
+      - name: record_assistant
+        type: write_file
+        when: "ok"
+        params:
+          path: "{{ fork_file }}"
+          append: true
+          content: "{{ message | to_json }}{{ nl }}"
+
+      - name: run_tools
+        type: script_exec
+        when: "wants_tools"
+        params:
+          interpreter: python3
+          path: memory.py
+          args: [tools, "{{ memory_dir }}"]
+          stdin: "{{ reply }}"
+        register: ran
+
+      - name: parse_ran
+        type: set_fact
+        when: "wants_tools"
+        vars:
+          ran_out: "{{ ran.stdout | from_json }}"
+
+      - name: record_tools
+        type: write_file
+        when: "wants_tools"
+        params:
+          path: "{{ fork_file }}"
+          append: true
+          content: "{{ ran_out.message | to_json }}{{ nl }}"
+
+      - name: show_written
+        type: script_exec
+        when: "wants_tools"
+        params:
+          interpreter: python3
+          path: show.py
+          args: [memory]
+          stdin: "{{ ran.stdout }}"
+
+      - name: continue
+        workflow: extract_step
+        when: "wants_tools and round < extract_max_turns"
+        vars:
+          fork_file: "{{ fork_file }}"
+          context_file: "{{ context_file }}"
+          relay_api_key: "{{ relay_api_key }}"
+          round: "{{ round + 1 }}"
+
+  # ---- tools: one workflow per tool, named tool_<name> ----
+
+  - name: tool_bash
+    vars:
+      block: null
+      session_file: null
+    steps:
+      - name: announce
+        type: script_exec
+        params:
+          interpreter: python3
+          path: show.py
+          args: [tool, Bash, "{{ block.input.command }}"]
+
+      - name: approval
+        type: prompt
+        when: "approve == 'ask'"
+        params:
+          message: "  run it?"
+          choices: ["y", "n"]
+          default: "y"
+          case_insensitive: true
+        register: approval
+
+      - name: decide
+        type: set_fact
+        vars:
+          approved: "approve != 'ask' or approval.value == 'y'"
+
+      - name: run
+        type: script_exec
+        when: "approved"
+        ignore_errors: true
+        params:
+          interpreter: bash
+          content: "{{ block.input.command }}"
+          live_output: true      # each line reaches the terminal as it is written (tty:// output:lines)
+        register: run
+
+      - name: result_ok
+        type: set_fact
+        when: "approved"
+        vars:
+          message:
+            role: user
+            content:
+              - type: tool_result
+                tool_use_id: "{{ block.id }}"
+                content: "{{ run.stdout | truncatechars:max_tool_output }}{{ run.stderr | truncatechars:max_tool_output }}\n[exit code {{ run.exit_code }}]"
+
+      - name: result_denied
+        type: set_fact
+        when: "not approved"
+        vars:
+          message:
+            role: user
+            content:
+              - type: tool_result
+                tool_use_id: "{{ block.id }}"
+                is_error: true
+                content: "The user declined to run this command."
+
+      - name: record
+        type: write_file
+        params:
+          path: "{{ session_file }}"
+          append: true
+          content: "{{ message | to_json }}{{ nl }}"
+
+      - name: show_exit
+        type: script_exec
+        when: "approved"
+        params:
+          interpreter: python3
+          path: show.py
+          args: [exit, "{{ run.exit_code }}"]
+
+      - name: show_denied
+        type: script_exec
+        when: "not approved"
+        params:
+          interpreter: python3
+          path: show.py
+          args: [result]
+          stdin: "{{ message }}"
+
+  - name: tool_read_file
+    vars:
+      block: null
+      session_file: null
+    steps:
+      - name: read
+        type: script_exec
+        ignore_errors: true
+        params:
+          interpreter: python3
+          path: search.py
+          args: [read]
+          stdin: "{{ block.input }}"
+        register: read
+
+      - name: result
+        type: set_fact
+        vars:
+          message:
+            role: user
+            content:
+              - type: tool_result
+                tool_use_id: "{{ block.id }}"
+                is_error: "{{ read.exit_code != 0 }}"
+                content: "{% if read.exit_code != 0 %}{{ read.stdout | truncatechars:2000 }}{% else %}{{ read.stdout | truncatechars:max_tool_output }}{% endif %}"
+
+      - name: record
+        type: write_file
+        params:
+          path: "{{ session_file }}"
+          append: true
+          content: "{{ message | to_json }}{{ nl }}"
+
+      - name: show
+        type: script_exec
+        params:
+          interpreter: python3
+          path: show.py
+          args: [call, Read, "{{ block.input.path }}"]
+          stdin: "{{ message }}"
+
+  - name: tool_glob
+    vars:
+      block: null
+      session_file: null
+    steps:
+      - name: search
+        type: script_exec
+        ignore_errors: true
+        params:
+          interpreter: python3
+          path: search.py
+          args: [glob]
+          stdin: "{{ block.input }}"
+        register: search
+
+      - name: result
+        type: set_fact
+        vars:
+          message:
+            role: user
+            content:
+              - type: tool_result
+                tool_use_id: "{{ block.id }}"
+                content: "{% if search.exit_code != 0 %}error: {{ search.stderr | truncatechars:2000 }}{% else %}{{ search.stdout | truncatechars:max_tool_output }}{% endif %}"
+
+      - name: record
+        type: write_file
+        params:
+          path: "{{ session_file }}"
+          append: true
+          content: "{{ message | to_json }}{{ nl }}"
+
+      - name: show
+        type: script_exec
+        params:
+          interpreter: python3
+          path: show.py
+          args: [call, Glob, "{{ block.input.pattern }}"]
+          stdin: "{{ message }}"
+
+  - name: tool_grep
+    vars:
+      block: null
+      session_file: null
+    steps:
+      - name: search
+        type: script_exec
+        ignore_errors: true
+        params:
+          interpreter: python3
+          path: search.py
+          args: [grep]
+          stdin: "{{ block.input }}"
+        register: search
+
+      - name: result
+        type: set_fact
+        vars:
+          message:
+            role: user
+            content:
+              - type: tool_result
+                tool_use_id: "{{ block.id }}"
+                content: "{% if search.exit_code != 0 %}error: {{ search.stderr | truncatechars:2000 }}{% else %}{{ search.stdout | truncatechars:max_tool_output }}{% endif %}"
+
+      - name: record
+        type: write_file
+        params:
+          path: "{{ session_file }}"
+          append: true
+          content: "{{ message | to_json }}{{ nl }}"
+
+      - name: show
+        type: script_exec
+        params:
+          interpreter: python3
+          path: show.py
+          args: [call, Grep, "{{ block.input.pattern }}"]
+          stdin: "{{ message }}"
+
+  - name: tool_write_file
+    vars:
+      block: null
+      session_file: null
+    steps:
+      - name: announce
+        type: script_exec
+        params:
+          interpreter: python3
+          path: show.py
+          args: [tool, Write, "{{ block.input.path }}"]
+
+      - name: memory_check
+        type: script_exec
+        params:
+          interpreter: python3
+          path: memory.py
+          args: [owns, "{{ memory_dir }}", "{{ block.input.path }}"]
+        register: memory_check
+
+      - name: in_memory
+        type: set_fact
+        vars:
+          in_memory: "memory_check.stdout == 'true'"
+
+      - name: approval
+        type: prompt
+        when: "approve == 'ask' and not in_memory"
+        params:
+          message: "  write it?"
+          choices: ["y", "n"]
+          default: "y"
+          case_insensitive: true
+        register: approval
+
+      - name: decide
+        type: set_fact
+        vars:
+          approved: "approve != 'ask' or in_memory or approval.value == 'y'"
+
+      - name: write
+        type: write_file
+        when: "approved"
+        ignore_errors: true
+        params:
+          path: "{{ block.input.path }}"
+          content: "{{ block.input.content }}"
+        register: written
+
+      - name: result
+        type: set_fact
+        vars:
+          message:
+            role: user
+            content:
+              - type: tool_result
+                tool_use_id: "{{ block.id }}"
+                content: "{% if not approved %}The user declined this write.{% elif written.failed %}error: {{ written.error }}{% else %}wrote {{ written.bytes }} bytes to {{ written.path }}{% endif %}"
+
+      - name: record
+        type: write_file
+        params:
+          path: "{{ session_file }}"
+          append: true
+          content: "{{ message | to_json }}{{ nl }}"
+
+      - name: preview
+        type: script_exec
+        params:
+          interpreter: python3
+          path: show.py
+          args: [result]
+          stdin: "{{ message }}"
+
+  - name: tool_edit_file
+    vars:
+      block: null
+      session_file: null
+    steps:
+      - name: announce
+        type: script_exec
+        params:
+          interpreter: python3
+          path: show.py
+          args: [tool, Edit, "{{ block.input.path }}"]
+
+      # Work out the change without making it, and show it as a diff before asking.
+      - name: check
+        type: script_exec
+        params:
+          interpreter: python3
+          path: edit.py
+          args: [diff]
+          stdin: "{{ block.input }}"
+        register: check
+
+      - name: parse_plan
+        type: set_fact
+        vars:
+          plan: "{{ check.stdout | from_json }}"
+
+      - name: show_diff
+        type: script_exec
+        params:
+          interpreter: python3
+          path: show.py
+          args: [diff]
+          stdin: "{{ check.stdout }}"
+
+      - name: memory_check
+        type: script_exec
+        params:
+          interpreter: python3
+          path: memory.py
+          args: [owns, "{{ memory_dir }}", "{{ block.input.path }}"]
+        register: memory_check
+
+      - name: in_memory
+        type: set_fact
+        vars:
+          in_memory: "memory_check.stdout == 'true'"
+
+      - name: approval
+        type: prompt
+        when: "plan.ok and approve == 'ask' and not in_memory"
+        params:
+          message: "  apply it?"
+          choices: ["y", "n"]
+          default: "y"
+          case_insensitive: true
+        register: approval
+
+      - name: decide
+        type: set_fact
+        vars:
+          approved: "plan.ok and (approve != 'ask' or in_memory or approval.value == 'y')"
+
+      - name: apply
+        type: script_exec
+        when: "approved"
+        params:
+          interpreter: python3
+          path: edit.py
+          args: [apply]
+          stdin: "{{ block.input }}"
+        register: apply
+
+      - name: parse_applied
+        type: set_fact
+        vars:
+          applied: "{% if approved %}{{ apply.stdout }}{% else %}{}{% endif %}"
+
+      - name: outcome
+        type: set_fact
+        vars:
+          done: "{{ applied | from_json }}"
+
+      - name: result
+        type: set_fact
+        vars:
+          message:
+            role: user
+            content:
+              - type: tool_result
+                tool_use_id: "{{ block.id }}"
+                is_error: "{{ not done.ok }}"
+                content: "{% if not plan.ok %}error: {{ plan.error }}{% elif not approved %}The user declined this edit.{% elif not done.ok %}error: {{ done.error }}{% else %}edited {{ block.input.path }}: replaced {{ done.count }} occurrence{{ done.count | pluralize }}{% endif %}"
+
+      - name: record
+        type: write_file
+        params:
+          path: "{{ session_file }}"
+          append: true
+          content: "{{ message | to_json }}{{ nl }}"
+
+      - name: preview
+        type: script_exec
+        when: "not done.ok"
+        params:
+          interpreter: python3
+          path: show.py
+          args: [result]
+          stdin: "{{ message }}"
+
+  - name: tool_unknown
+    vars:
+      block: null
+      session_file: null
+      invalid: false
+    steps:
+      - name: result
+        type: set_fact
+        vars:
+          message:
+            role: user
+            content:
+              - type: tool_result
+                tool_use_id: "{{ block.id }}"
+                is_error: true
+                content: "{% if invalid %}The input for {{ block.name }} was not a complete JSON object, so it was not run.{% else %}Unknown tool: {{ block.name }}{% endif %}"
+
+      - name: record
+        type: write_file
+        params:
+          path: "{{ session_file }}"
+          append: true
+          content: "{{ message | to_json }}{{ nl }}"
+
+      - name: preview
+        type: script_exec
+        params:
+          interpreter: python3
+          path: show.py
+          args: [result]
+          stdin: "{{ message }}"
