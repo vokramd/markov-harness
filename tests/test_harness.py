@@ -246,6 +246,17 @@ def test_prompt_cache_is_read_on_the_next_call():
     assert m and int(m.group(1)) > 3000, out
 
 
+def test_tool_rounds_are_capped():
+    s = Session("--var", "approve=auto", "--var", "max_tool_rounds=1")
+    out = s.say("Use the bash tool to run: echo first-call . After you see its output, use the bash tool "
+                "again to run: echo second-call . Then reply with: done")
+    assert "Bash(echo first-call)" in out and "Bash(echo second-call)" not in out, out   # one model call only
+    assert "stopped after 1 model calls" in out, out
+    out = s.say("Reply with only: still-here")                   # the session carries on
+    assert "still-here" in out, out
+    s.exit()
+
+
 def test_memory_index_loaded_and_writes_need_no_approval():
     work = os.path.join(HERE, ".state", "work-memory")
     run_dir = f"test-memory/{uuid.uuid4().hex[:8]}"         # a fresh memory dir, so earlier runs can't interfere

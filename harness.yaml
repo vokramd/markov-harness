@@ -5,9 +5,9 @@
 #   bin/harness --var approve=auto    # run tools without asking
 #
 # Shape:
-#   main ─▶ turn ─▶ prompt ─▶ append user msg ─▶ agent_step ─▶ turn (recurse until /exit)
+#   main ─▶ turn ─▶ prompt ─▶ append user msg ─▶ agent_step   (turn: repeat until /exit)
 #   agent_step ─▶ build request from session JSONL ─▶ POST /v1/messages ─▶ append assistant msg
-#              ─▶ print text ─▶ for_each tool_use: workflow tool_<name> ─▶ agent_step (while stop_reason == tool_use)
+#              ─▶ print text ─▶ for_each tool_use: workflow tool_<name>   (agent_step: repeat while stop_reason == tool_use)
 #   tool_<name> ─▶ (approve) ─▶ run ─▶ append tool_result
 #   Read-only tools (read_file, glob, grep) run in parallel and need no approval; the others run one
 #   at a time, each asking first unless approve=auto.
@@ -25,6 +25,8 @@ vars:
   relay_key_file: .state/relay-api-key   # bin/harness passes /run/secrets/relay-api-key
   state_dir: .state                      # bin/harness passes /state
   memory_dir: .state/memory              # bin/harness passes /state/projects/<workdir key>/memory
+  max_turns: 100000                      # user turns per session
+  max_tool_rounds: 50                    # model calls per user turn while it keeps asking for tools
   extract_memories: true                 # run the extraction pass after each turn
   extract_max_turns: 5                   # model calls per pass, as in Claude Code
   model: claude-haiku-5-5
@@ -146,8 +148,12 @@ workflows:
         vars:
           session_file: "{{ session_path }}"
           relay_api_key: "{{ load_key.artifacts.key | trim }}"
+        repeat:
+          until: "quit"
+          max: "{{ max_turns }}"
+          on_max: stop
 
-  # One user turn: read input, record it, let the agent work, then recurse for the next turn.
+  # One user turn: read input, record it, let the agent work. main repeats it until /exit.
   - name: turn
     vars:
       session_file: null
@@ -183,9 +189,22 @@ workflows:
       - name: agent
         workflow: agent_step
         when: "not quit"
+        register: agent
         vars:
           session_file: "{{ session_file }}"
           relay_api_key: "{{ relay_api_key }}"
+        repeat:
+          until: "not ok or reply.stop_reason != 'tool_use'"
+          max: "{{ max_tool_rounds }}"
+          on_max: stop
+
+      - name: tool_limit
+        type: script_exec
+        when: "not quit and agent.stopped_by == 'max'"
+        params:
+          interpreter: python3
+          path: show.py
+          args: [note, "stopped after {{ max_tool_rounds }} model calls in this turn (max_tool_rounds); the model was still asking for tools"]
 
       - name: extract
         workflow: extract_memories
@@ -194,14 +213,7 @@ workflows:
           session_file: "{{ session_file }}"
           relay_api_key: "{{ relay_api_key }}"
 
-      - name: next_turn
-        workflow: turn
-        when: "not quit"
-        vars:
-          session_file: "{{ session_file }}"
-          relay_api_key: "{{ relay_api_key }}"
-
-  # One model call, plus the tools it asked for; recurses while the model wants tool results.
+  # One model call, plus the tools it asked for; turn repeats it while the model wants tool results.
   - name: agent_step
     vars:
       session_file: null
@@ -368,13 +380,6 @@ workflows:
           session_file: "{{ session_file }}"
           invalid: "{{ block.id in reply.invalid }}"
 
-      - name: continue
-        workflow: agent_step
-        when: "ok and reply.stop_reason == 'tool_use'"
-        vars:
-          session_file: "{{ session_file }}"
-          relay_api_key: "{{ relay_api_key }}"
-
   # ---- memory extraction: a fork of the conversation after each turn ----
 
   # Decides (deterministically) whether the turn is worth a pass, and if so writes the fork session.
@@ -403,16 +408,19 @@ workflows:
           fork_file: "{{ session_file }}.extract.jsonl"
           context_file: "{{ session_file }}.context"
           relay_api_key: "{{ relay_api_key }}"
-          round: 1
+        repeat:
+          until: "not wants_tools"
+          max: "{{ extract_max_turns }}"
+          on_max: stop
 
-  # One model call of the fork, plus its tools; recurses while it wants tool results, up to
-  # extract_max_turns calls. Not streamed, so nothing but the "memory updated" line reaches the terminal.
+  # One model call of the fork, plus its tools; extract_memories repeats it while it wants tool
+  # results, up to extract_max_turns calls. Not streamed, so nothing but the "memory updated" line
+  # reaches the terminal.
   - name: extract_step
     vars:
       fork_file: null
       context_file: null
       relay_api_key: null
-      round: 1
     steps:
       - name: build
         type: script_exec
@@ -518,15 +526,6 @@ workflows:
           path: show.py
           args: [memory]
           stdin: "{{ ran.stdout }}"
-
-      - name: continue
-        workflow: extract_step
-        when: "wants_tools and round < extract_max_turns"
-        vars:
-          fork_file: "{{ fork_file }}"
-          context_file: "{{ context_file }}"
-          relay_api_key: "{{ relay_api_key }}"
-          round: "{{ round + 1 }}"
 
   # ---- tools: one workflow per tool, named tool_<name> ----
 

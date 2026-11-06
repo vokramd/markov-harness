@@ -12,6 +12,7 @@ markov captures a step's stdout/stderr, so this writes to /dev/tty (falling back
                                                              so parallel tools don't interleave)
     show.py exit <code>      (after a command whose output streamed live)
     show.py diff             < edit.py diff JSON
+    show.py note <text>      (a dim line: something the harness did on its own)
     show.py memory           < memory.py tools JSON (a line naming the memory files it changed, if any)
     show.py memory-error <status> < response body JSON or text (the extraction pass's model call failed)
 """
@@ -90,6 +91,8 @@ def main(argv):
                 out.write(f"    {color}{row}{RESET}\n")
             if len(rows) - 2 > MAX_DIFF_LINES:
                 out.write(f"    {DIM}… +{len(rows) - 2 - MAX_DIFF_LINES} lines{RESET}\n")
+    elif cmd == "note":
+        out.write(f"{DIM}  ✻ {argv[2]}{RESET}\n")
     elif cmd == "memory":
         names = sorted({os.path.basename(p) for p in read_json().get("written", [])})
         if names:

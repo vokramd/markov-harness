@@ -104,7 +104,7 @@ Not copied (yet): relevance-selected recall and periodic consolidation ("dream")
 
 | Piece | Where |
 |---|---|
-| Loop | `turn` and `agent_step` recurse (markov has no while loop) |
+| Loop | markov `repeat` (flat do-while loops): `main` repeats `turn` until `/exit`; `turn` repeats `agent_step` while the model asks for tools, up to `max_tool_rounds` (50) calls; the extraction pass repeats `extract_step` up to `extract_max_turns` (5) |
 | User input / tool approval | markov `prompt` step (needs a TTY) |
 | Conversation state | `/state/sessions/<run>.jsonl` (host: `.state/container/sessions/`), one message per line, appended with `write_file` |
 | Request shaping | `scripts/history.py` turns the JSONL into `messages`, merging same-role lines |
