@@ -4,6 +4,8 @@ A minimal coding-agent harness (a tiny Claude Code) built entirely as a markov w
 prompts for input, shapes the conversation into a Messages API request, calls the model through
 model-relay, runs the tools the model asks for, and prints the reply.
 
+![markov-harness demo: reading, editing and running code with approvals, then a memory saved in one session and applied in the next](demo/demo.gif)
+
 ```bash
 make -C ../markov build-static                         # once: CGO_ENABLED=0 markov at ../markov/bin/static/markov
 bin/harness                                            # new session; tools act on $PWD (mounted at /work)
@@ -14,6 +16,21 @@ bin/harness --var model=claude-sonnet-5-5
 bin/harness --var thinking_display=omitted            # hide the model's thinking (it still thinks)
 python3 tests/test_harness.py                          # end-to-end tests (pexpect, real relay, container)
 ```
+
+## Demo
+
+`demo/demo.gif` (above) is rendered from `demo/demo.cast`, an [asciinema](https://asciinema.org) recording of
+`demo/drive.py`: a scripted run that types the prompts and answers every approval with `y`. The model's replies are real
+(claude-haiku-5-5). In the first session the extraction pass saves that `python` is missing, and the user states a preference
+that the main agent saves. The second session then applies it. To record it again (asciinema 3 and
+[agg](https://github.com/asciinema/agg)):
+
+```bash
+asciinema rec --headless -c "python3 demo/drive.py .state/demo-3" --window-size 100x30 --idle-time-limit 2 demo/demo.cast
+agg --speed 1.5 --font-size 14 --last-frame-duration 5 --font-family "Noto Sans Mono,Adwaita Mono,Symbola" demo/demo.cast demo/demo.gif
+```
+
+`asciinema play demo/demo.cast` replays it in a terminal. The work dir must be new, so its memory starts empty.
 
 ## Container
 
