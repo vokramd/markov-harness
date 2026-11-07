@@ -197,3 +197,7 @@ markov's own log goes to `.state/container/markov.log`. The relay key is in `.st
   on `scripts/search.py read`, which returns the error as the tool result text without extra steps.
 - No map literals in templates; build records with `set_fact` maps instead.
 - The newer models need the Claude Code identity line as the first system block (see `client_identity`).
+
+## License
+
+[Apache License 2.0](LICENSE)
