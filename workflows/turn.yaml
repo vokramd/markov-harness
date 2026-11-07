@@ -16,17 +16,41 @@ steps:
     vars:
       quit: "user_input.value == '/exit' or user_input.value == '/quit'"
 
+  # Plain text stays as typed; /<skill> [args] becomes the skill's instructions (scripts/skills.py).
+  - name: expand
+    type: script_exec
+    when: "not quit"
+    params:
+      interpreter: python3
+      path: skills.py
+      args: [user, "{{ markov_source_dir }}/skills", "{{ skills_dir }}", "{{ project_skills_dir }}"]
+      stdin: "{{ user_input }}"
+    register: expand
+
   - name: user_msg
     type: set_fact
     when: "not quit"
     vars:
-      message:
-        role: user
-        content: "{{ user_input.value }}"
+      expanded: "{{ expand.stdout | from_json }}"
+
+  - name: check_send
+    type: set_fact
+    when: "not quit"
+    vars:
+      send: "not expanded.error"
+      message: "{{ expanded.message }}"
+
+  - name: show_expand
+    type: script_exec
+    when: "not quit and (expanded.error or expanded.skill)"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [note, "{% if expanded.error %}{{ expanded.error }}{% else %}loaded skill {{ expanded.skill }}{% endif %}"]
 
   - name: record_user
     type: write_file
-    when: "not quit"
+    when: "not quit and send"
     params:
       path: "{{ session_file }}"
       append: true
@@ -34,7 +58,7 @@ steps:
 
   - name: agent
     workflow: agent_step
-    when: "not quit"
+    when: "not quit and send"
     register: agent
     vars:
       session_file: "{{ session_file }}"
@@ -47,7 +71,7 @@ steps:
 
   - name: tool_limit
     type: script_exec
-    when: "not quit and agent.stopped_by == 'max'"
+    when: "not quit and send and agent.stopped_by == 'max'"
     params:
       interpreter: python3
       path: show.py
@@ -55,7 +79,7 @@ steps:
 
   - name: extract
     workflow: extract.memories
-    when: "not quit and extract_memories"
+    when: "not quit and send and extract_memories"
     vars:
       session_file: "{{ session_file }}"
       relay_api_key: "{{ relay_api_key }}"

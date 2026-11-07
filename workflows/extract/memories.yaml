@@ -24,6 +24,7 @@ steps:
     vars:
       fork_file: "{{ session_file }}.extract.jsonl"
       context_file: "{{ session_file }}.context"
+      skills_file: "{{ session_file }}.skills"
       relay_api_key: "{{ relay_api_key }}"
       request_base: "{{ request_base }}"
     repeat:

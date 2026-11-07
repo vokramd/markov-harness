@@ -5,6 +5,7 @@ name: extract.step
 vars:
   fork_file: null
   context_file: null
+  skills_file: null       # the parent's reminders, so the fork's first message matches the parent's cached one
   relay_api_key: null
   request_base: null
 steps:
@@ -13,7 +14,7 @@ steps:
     params:
       interpreter: python3
       path: history.py
-      args: [messages, "{{ fork_file }}", "{{ context_file }}"]
+      args: [messages, "{{ fork_file }}", "{{ context_file }}", "{{ skills_file }}"]
     register: history
 
   - name: call_model

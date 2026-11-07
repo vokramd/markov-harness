@@ -1,0 +1,34 @@
+name: tools.skill
+vars:
+  block: null
+  session_file: null
+steps:
+  # The tool_result ("Launching skill: <name>") and, after it, the skill's instructions (scripts/skills.py).
+  - name: load
+    type: script_exec
+    params:
+      interpreter: python3
+      path: skills.py
+      args: [load, "{{ markov_source_dir }}/skills", "{{ skills_dir }}", "{{ project_skills_dir }}"]
+      stdin: "{{ block }}"
+    register: load
+
+  - name: result
+    type: set_fact
+    vars:
+      message: "{{ load.stdout | from_json }}"
+
+  - name: record
+    type: write_file
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ message | to_json }}\n"
+
+  - name: show
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [skill, "{{ block.input.skill }}"]
+      stdin: "{{ message }}"

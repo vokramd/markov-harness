@@ -3,6 +3,8 @@ relay_base_url: http://relay-api.local
 relay_key_file: .state/relay-api-key   # bin/harness passes /run/secrets/relay-api-key
 state_dir: .state                      # bin/harness passes /state
 memory_dir: .state/memory              # bin/harness passes /state/projects/<workdir key>/memory
+skills_dir: .state/skills              # personal skills (<name>/SKILL.md), after the repo's skills/; bin/harness passes /state/skills
+project_skills_dir: .claude/skills     # the work dir's skills, searched last; an earlier skill of the same name wins
 max_turns: 100000                      # user turns per session
 max_tool_rounds: 50                    # model calls per user turn while it keeps asking for tools
 extract_memories: true                 # run the extraction pass after each turn
@@ -15,5 +17,5 @@ thinking_display: summarized
 session: ""          # session JSONL to resume; empty starts a new one
 approve: ask          # ask | auto
 max_tool_output: 30000
-readonly_tools: [read_file, glob, grep]       # run in parallel, no approval
+readonly_tools: [read_file, glob, grep, skill]  # run in parallel, no approval
 mutating_tools: [bash, write_file, edit_file]  # run one at a time, approved first

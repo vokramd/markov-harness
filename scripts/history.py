@@ -3,11 +3,12 @@
 Consecutive messages with the same role are merged into one, so several tools that each
 append their own tool_result line still produce the single user message the API expects.
 
-    python3 history.py messages <session.jsonl> [<context>]   -> JSON array on stdout
+    python3 history.py messages <session.jsonl> [<context>...]   -> JSON array on stdout
     python3 history.py assemble < http_request output   -> the streamed reply as one message
 
-A non-empty context file (memory.py context's snapshot of the memory index) goes at the start of
-the first user message, inside <system-reminder> tags, the way Claude Code delivers MEMORY.md.
+Each non-empty context file (memory.py context's snapshot of the memory index, skills.py context's
+listing of the skills) goes at the start of the first user message, in order, each inside its own
+<system-reminder> tags, the way Claude Code delivers MEMORY.md and the skill listing.
 
 `assemble` reads a streaming http_request's output ({status_code, body: [{event, data}, ...]}), or a
 non-streaming one whose body is the message itself, and prints {content, stop_reason, usage, invalid}, or {error, status} when the call or the stream
@@ -25,7 +26,7 @@ def blocks(content):
     return list(content)
 
 
-def messages(path, context_path=None):
+def messages(path, *context_paths):
     merged = []
     try:
         with open(path, encoding="utf-8") as f:
@@ -42,16 +43,17 @@ def messages(path, context_path=None):
     for msg in merged:
         if msg["role"] == "user" and isinstance(msg["content"], list):
             msg["content"].sort(key=lambda b: b.get("type") != "tool_result")
-    context = ""
-    if context_path:
+    reminders = []
+    for context_path in context_paths:
         try:
             with open(context_path, encoding="utf-8") as f:
                 context = f.read().strip()
         except FileNotFoundError:
-            pass
-    if context and merged and merged[0]["role"] == "user":
-        reminder = {"type": "text", "text": f"<system-reminder>\n{context}\n</system-reminder>"}
-        merged[0]["content"] = [reminder] + blocks(merged[0]["content"])
+            continue
+        if context:
+            reminders.append({"type": "text", "text": f"<system-reminder>\n{context}\n</system-reminder>"})
+    if reminders and merged and merged[0]["role"] == "user":
+        merged[0]["content"] = reminders + blocks(merged[0]["content"])
     return merged
 
 
@@ -115,12 +117,12 @@ def assemble(response):
 
 
 def main(argv):
-    if len(argv) in (3, 4) and argv[1] == "messages":
+    if len(argv) >= 3 and argv[1] == "messages":
         json.dump(messages(*argv[2:]), sys.stdout)
     elif len(argv) == 2 and argv[1] == "assemble":
         json.dump(assemble(json.load(sys.stdin)), sys.stdout)
     else:
-        sys.exit("usage: history.py messages <session.jsonl> [<context>] | history.py assemble < response.json")
+        sys.exit("usage: history.py messages <session.jsonl> [<context>...] | history.py assemble < response.json")
 
 
 if __name__ == "__main__":

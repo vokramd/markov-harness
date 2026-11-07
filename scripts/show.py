@@ -13,6 +13,7 @@ markov captures a step's stdout/stderr, so this writes to /dev/tty (falling back
     show.py exit <code>      (after a command whose output streamed live)
     show.py diff             < edit.py diff JSON
     show.py note <text>      (a dim line: something the harness did on its own)
+    show.py skill <name>     < skills.py load message (the skill tool: loaded, or why not)
     show.py memory           < memory.py tools JSON (a line naming the memory files it changed, if any)
     show.py memory-error <status> < response body JSON or text (the extraction pass's model call failed)
 """
@@ -100,6 +101,13 @@ def main(argv):
                 out.write(f"    {color}{row}{RESET}\n")
             if len(rows) - 2 > MAX_DIFF_LINES:
                 out.write(f"    {DIM}… +{len(rows) - 2 - MAX_DIFF_LINES} lines{RESET}\n")
+    elif cmd == "skill":
+        result = next((b for b in read_json().get("content", []) if b.get("type") == "tool_result"), {})
+        out.write(f"\n{GREEN}⏺{RESET} {BOLD}Skill{RESET}({argv[2] if len(argv) > 2 else ''})\n")
+        if result.get("is_error"):
+            out.write(f"{RED}  ⎿ {result.get('content')}{RESET}\n")
+        else:
+            out.write(f"{DIM}  ⎿ Successfully loaded skill{RESET}\n")
     elif cmd == "note":
         out.write(f"{DIM}  ✻ {argv[2]}{RESET}\n")
     elif cmd == "memory":

@@ -20,6 +20,14 @@ steps:
       path: memory.py
       args: [context, "{{ memory_dir }}", "{{ session_path }}.context"]
 
+  # Snapshots the skill listing for this session (see scripts/skills.py), like memory_context.
+  - name: skills_context
+    type: script_exec
+    params:
+      interpreter: python3
+      path: skills.py
+      args: [context, "{{ session_path }}.skills", "{{ markov_source_dir }}/skills", "{{ skills_dir }}", "{{ project_skills_dir }}"]
+
   # The system blocks and thinking settings every model call sends. Built once here, so
   # agent_step and extract.step send the same bytes and the extraction pass reads the main
   # loop's prompt cache. (A YAML anchor did this when the workflow was one file.)

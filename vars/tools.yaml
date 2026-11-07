@@ -62,3 +62,22 @@ tools:
         glob: {type: string, description: "Only search files whose name matches this glob, such as *.go."}
         ignore_case: {type: boolean}
       required: [pattern]
+  # Claude Code's Skill tool. The listing of skills arrives as a <system-reminder> in the first user
+  # message (scripts/skills.py context); loading one adds its instructions after the tool result.
+  - name: skill
+    description: >-
+      Execute a skill within the main conversation. When users ask you to perform tasks, check if any
+      of the available skills match. Skills provide specialized capabilities and domain knowledge.
+      When a skill matches the user's request, invoking it is a BLOCKING REQUIREMENT: invoke this tool
+      before generating any other response about the task. Only use skills listed in the available
+      skills reminder; do not guess names. When users reference a "slash command" or "/<something>"
+      (e.g. "/commit"), they are referring to a skill: use this tool to invoke it. If a
+      <command-name> tag is already present in the current turn, the skill is already loaded: follow
+      its instructions directly instead of calling this tool again.
+    eager_input_streaming: true
+    input_schema:
+      type: object
+      properties:
+        skill: {type: string, description: "The skill name, e.g. \"commit\" or \"review-pr\"."}
+        args: {type: string, description: Optional arguments for the skill.}
+      required: [skill]

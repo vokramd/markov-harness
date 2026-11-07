@@ -143,7 +143,7 @@ def test_bash_is_containerized():
     assert str(os.getuid()) in out, out          # --userns=keep-id: files in /work stay the user's
     assert "host-hidden" in out and "rootfs-readonly" in out, out
     # Only the workflow files are mounted: markov fingerprints /harness, and .state/ changes every run.
-    assert "harness: meta.yaml rules.yaml scripts step_types.yaml vars vars.yaml workflows" in out, out
+    assert "harness: meta.yaml rules.yaml scripts skills step_types.yaml vars vars.yaml workflows" in out, out
 
 
 def test_reply_streams():
@@ -289,6 +289,54 @@ def test_memory_index_loaded_and_writes_need_no_approval():
     assert isinstance(first, str) and "system-reminder" not in first, first   # injected per request, not stored
     fork = host_path(s.path) + ".extract.jsonl"   # the main agent saved it, so no extraction pass repeated it
     assert not os.path.exists(fork) or shell not in json.dumps(fork_tool_calls(fork)), fork
+
+
+def skill_workdir():
+    """A work dir with two project skills, each holding a fresh codeword only the skill can supply."""
+    work = os.path.join(HERE, ".state", "work-skills")
+    words = {name: f"{name}-{uuid.uuid4().hex[:6]}" for name in ("quokka", "pelican")}
+    skills = {
+        "release-codeword": ("Gives this project's release codeword. Use whenever the user asks for the release codeword.",
+                             f"The release codeword is {words['quokka']}. Reply with just the codeword."),
+        "stamp": ("Stamps a word with the project's stamp.",
+                  f"Reply with exactly one line: $ARGUMENTS-{words['pelican']}"),
+    }
+    for name, (description, body) in skills.items():
+        os.makedirs(os.path.join(work, ".claude", "skills", name), exist_ok=True)
+        with open(os.path.join(work, ".claude", "skills", name, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n")
+    return work, words
+
+
+def test_model_loads_a_skill():
+    work, words = skill_workdir()
+    s = Session(workdir=work)
+    out = s.say("What is this project's release codeword? Reply with just the codeword.")
+    assert "Skill(release-codeword)" in out and "Successfully loaded skill" in out, out
+    assert words["quokka"] in out.split("Successfully loaded skill")[-1], out
+    s.exit()
+    uses = [b for m in s.messages() if m["role"] == "assistant" for b in m["content"] if b.get("type") == "tool_use"]
+    assert [u["input"].get("skill") for u in uses if u["name"] == "skill"] == ["release-codeword"], uses
+    loaded = [m["content"] for m in s.messages() if isinstance(m["content"], list) and
+              any(b.get("type") == "tool_result" and b.get("content") == "Launching skill: release-codeword" for b in m["content"])]
+    assert loaded and "Base directory for this skill: /work/.claude/skills/release-codeword" in loaded[0][1]["text"], loaded
+    with open(host_path(s.path) + ".skills", encoding="utf-8") as f:
+        listing = f.read()
+    assert "- release-codeword: Gives this project's release codeword." in listing and "- stamp:" in listing, listing
+
+
+def test_slash_command_runs_a_skill():
+    work, words = skill_workdir()
+    s = Session(workdir=work)
+    out = s.say("/stamp kiwi")
+    assert "loaded skill stamp" in out and f"kiwi-{words['pelican']}" in out, out
+    out = s.say("/no-such-skill")
+    assert "Unknown skill: no-such-skill" in out, out
+    s.exit()
+    msgs = s.messages()
+    assert len(msgs) == 2, msgs   # the unknown one reached neither the session nor the model
+    assert "<command-name>/stamp</command-name>\n<command-args>kiwi</command-args>" in msgs[0]["content"][0]["text"], msgs[0]
+    assert not any(b.get("type") == "tool_use" for b in msgs[1]["content"]), msgs[1]   # already loaded: no skill call
 
 
 def host_path(path):

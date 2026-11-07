@@ -34,7 +34,8 @@ one file per workflow:
 | `workflows/agent_step.yaml` | One model call and the tools it asks for |
 | `workflows/extract/memories.yaml`, `extract/step.yaml` | The memory extraction pass: `extract.memories`, `extract.step` |
 | `workflows/tools/*.yaml` | One workflow per tool, named by its path: `tools.bash`, `tools.read_file`, …, `tools.unknown` |
-| `scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`) |
+| `scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`, `skills.py`) |
+| `skills/` | Skills that ship with the harness, one `<name>/SKILL.md` folder each (see [Skills](#skills)) |
 | `rules.yaml`, `step_types.yaml` | Empty; markov requires them |
 
 markov fingerprints the whole workflow directory to detect edits on resume, and `.state/` changes on every run, so
@@ -68,9 +69,9 @@ each mount with `:z` for SELinux:
 | Host | Container | |
 |---|---|---|
 | `../markov/bin/static/markov` | `/usr/local/bin/markov` | ro |
-| `meta.yaml`, `vars.yaml`, `vars/`, `rules.yaml`, `step_types.yaml`, `workflows/`, `scripts/` | `/harness` (the directory workflow) | ro |
+| `meta.yaml`, `vars.yaml`, `vars/`, `rules.yaml`, `step_types.yaml`, `workflows/`, `scripts/`, `skills/` | `/harness` (the directory workflow) | ro |
 | `.state/relay-api-key` | `/run/secrets/relay-api-key` | ro |
-| `.state/container/` | `/state` (sessions, memory, `markov.log`, `markov-state.db`) | rw |
+| `.state/container/` | `/state` (sessions, memory, personal skills, `markov.log`, `markov-state.db`) | rw |
 | `$HARNESS_WORKDIR` (default `$PWD`) | `/work`, the tools' cwd | rw |
 
 The container runs with `--userns=keep-id`, `--cap-drop=all`, `no-new-privileges`, a read-only root with a tmpfs `/tmp`,
@@ -89,6 +90,7 @@ project (`markov-harness`) and can be rotated or revoked from the relay admin AP
 | `bash` | asks | Runs in `/work`; output streams to the terminal line by line (`live_output`), then `⎿ exit N` |
 | `write_file` | asks, except `.md` files in the memory dir | Create or replace a file |
 | `edit_file` | asks, after showing the diff, except `.md` files in the memory dir | Replace `old_string` with `new_string`; it must occur exactly once unless `replace_all`. `scripts/edit.py` plans the change, the diff is shown, and `apply` checks again before writing |
+| `skill` | never | Load a skill's instructions (see [Skills](#skills)) |
 | `read_file`, `glob`, `grep` | never | Read-only; several in one reply run in parallel (`concurrency: 4`), each printing its call and result together so they don't interleave. `scripts/search.py` skips `.git`, `node_modules` and the like and stops at 200 results |
 
 Read-only tools in a reply run before the ones that change things; tool calls in one reply are meant to be
@@ -126,6 +128,35 @@ A copy of Claude Code's auto-memory (2.1.319, lean prompt variant), kept in the 
 The tests turn extraction off except in the two memory tests, which use their own work dir or a fresh `--var memory_dir`.
 
 Not copied (yet): relevance-selected recall and periodic consolidation ("dream").
+
+## Skills
+
+A copy of Claude Code's skills. A skill is a directory with a `SKILL.md`: frontmatter with `name` and
+`description`, then the instructions.
+
+- **Where:** searched in this order, and the first skill of a name wins:
+  1. `skills/<name>/SKILL.md` at the root of this repo, the skills that ship with the harness (mounted at
+     `/harness/skills`, found as `{{ markov_source_dir }}/skills`). A `skills/` folder of
+     [Agent Skills](https://agentskills.io) folders is the layout of the anthropics/skills repo and of
+     Claude Code plugins.
+  2. Personal skills in `/state/skills/` (host: `.state/container/skills/`); `--var skills_dir=...` moves them.
+  3. The work dir's `.claude/skills/`, as in Claude Code; `--var project_skills_dir=...` moves them.
+- **Listing:** at session start, `scripts/skills.py context` snapshots the skills to `<session>.skills`, and
+  `history.py messages` puts it in the first user message as its own `<system-reminder>`, after the memory
+  index: `The following skills are available for use with the skill tool:` then `- name: description` lines.
+  Like the memory index it is fixed for the session, so the prompt cache holds.
+- **The model loads one** with the `skill` tool (`{skill, args}`), with no approval. The tool result is
+  `Launching skill: <name>`, and a text block after it in the same user message holds
+  `Base directory for this skill: <dir>` and the body, where `$ARGUMENTS` is replaced by `args` (or
+  `ARGUMENTS: <args>` is appended). The terminal shows `⏺ Skill(<name>)  ⎿ Successfully loaded skill`.
+- **The user loads one** by typing `/<name> [args]`. The user message is Claude Code's
+  `<command-message>`/`<command-name>`/`<command-args>` tags, then the same text block; the tool's
+  description tells the model a `<command-name>` tag means the skill is already loaded. A `/<word>` that
+  names no skill prints `Unknown skill: <word>` and reaches neither the session nor the model; a path
+  such as `/usr/bin/x` is plain text.
+- **Frontmatter honoured:** `disable-model-invocation: true` leaves a skill out of the listing and the tool
+  refuses it; `user-invocable: false` refuses `/<name>`. Not (yet): `allowed-tools`, `model`,
+  `argument-hint`, plugin and nested skill dirs, and a listing that changes mid-session.
 
 ## How it works
 

@@ -10,7 +10,7 @@ steps:
     params:
       interpreter: python3
       path: history.py
-      args: [messages, "{{ session_file }}", "{{ session_file }}.context"]
+      args: [messages, "{{ session_file }}", "{{ session_file }}.context", "{{ session_file }}.skills"]
     register: history
 
   - name: reply_gap
