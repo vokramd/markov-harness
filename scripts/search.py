@@ -34,8 +34,9 @@ def rel(path):
 
 
 def read(args):
-    # A script rather than a load_artifact step: markov fails the run on a load_artifact error even
-    # with ignore_errors, and the model often reads a file that isn't there (an empty MEMORY.md, say).
+    # A script rather than a load_artifact step: the model often reads a file that isn't there (an
+    # empty MEMORY.md, say), and this returns that as the result text. (load_artifact used to fail the
+    # run on a missing file even with ignore_errors; markov has fixed that since.)
     path = args.get("path")
     if not isinstance(path, str) or not path:
         return "error: path is required"

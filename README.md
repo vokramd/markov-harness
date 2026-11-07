@@ -115,8 +115,8 @@ A copy of Claude Code's auto-memory (2.1.319, lean prompt variant), kept in the 
   does when the turn finished, its user message has at least 3 words, and the main agent didn't already write memory
   in it. The pass then runs `extract.step` on a fork, `<session>.jsonl.extract.jsonl`: the parent's messages plus Claude
   Code's extraction prompt, with the existing memory files listed. That file is rewritten on each pass.
-  - **Request:** the same system blocks (YAML anchors), tools, thinking and model as the main loop, so it reads the
-    parent's prompt cache. It isn't streamed, so only a dim `✻ memory updated: …` line shows.
+  - **Request:** the same system blocks and thinking (`request_base`, from `main`), tools and model as the main loop, so
+    it reads the parent's prompt cache. It isn't streamed, so only a dim `✻ memory updated: …` line shows.
   - **Tools:** `memory.py tools` runs the fork's tool calls without asking. `read_file`/`glob`/`grep` work anywhere;
     `write_file`/`edit_file` only on `.md` files in the memory dir; `bash` only as `rm [-f]` of such files (for
     "forget X"). Anything else is denied.
@@ -149,7 +149,9 @@ markov's own log goes to `.state/container/markov.log`. The relay key is in `.st
 - `prompt` requires a TTY, so this can't run inside markov-ide (it gives runs `stdin: null`).
 - Whitespace after a single `{{ expr }}` used to be trimmed (`"{{ x | to_json }}\n"` lost the `\n`),
   because `exactExpression` trimmed before matching. Fixed in markov; the `{{ nl }}` workaround is gone.
-- The template docs list `truncate`; pongo2's filter is `truncatechars`. `markov validate` doesn't
-  catch unknown filters.
+- The template docs listed `truncate`; pongo2's filter is `truncatechars`, and `markov validate` didn't catch
+  unknown filters. Both fixed in markov: `validate` now parses every template and expression.
+- `load_artifact` ignored `ignore_errors`, so a missing file crashed the session. Fixed in markov; `read_file` stays
+  on `scripts/search.py read`, which returns the error as the tool result text without extra steps.
 - No map literals in templates; build records with `set_fact` maps instead.
 - The newer models need the Claude Code identity line as the first system block (see `client_identity`).

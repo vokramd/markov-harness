@@ -158,10 +158,11 @@ def test_reply_streams():
         text += chunk
     s.wait(PROMPT)
     s.exit()
-    reply = [t for t, c in arrivals if re.search(r"[a-z]", ANSI.sub("", c))]
+    # Counted in reads, not seconds: haiku writes the whole reply in a few tenths of a second, so a
+    # time span flakes. Printed at once, the reply would come in a read or two; streamed, it comes in ~40.
+    reply = [c for _, c in arrivals if re.search(r"[a-z]", ANSI.sub("", c))]
     assert "eighty" in text.lower(), text[-300:]
-    assert len(reply) >= 5, f"reply arrived in {len(reply)} piece(s)"
-    assert reply[-1] - reply[0] > 0.3, f"reply pieces spanned only {reply[-1] - reply[0]:.2f}s"
+    assert len(reply) >= 10, f"reply arrived in {len(reply)} piece(s)"
     events = [e for e in s.messages()[-1]["content"] if e.get("type") == "text"]
     assert events and "eighty" in events[0]["text"].lower(), events  # assembled from the stream
 

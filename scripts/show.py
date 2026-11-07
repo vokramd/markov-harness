@@ -18,10 +18,14 @@ markov captures a step's stdout/stderr, so this writes to /dev/tty (falling back
 """
 import json
 import os
+import re
 import sys
 
 DIM, BOLD, RED, GREEN, CYAN, RESET = "\033[2m", "\033[1m", "\033[31m", "\033[32m", "\033[36m", "\033[0m"
 MAX_DIFF_LINES = 40
+# bin/harness's memory dir, /state/projects/<work dir with every non-alphanumeric as ->/memory: the
+# key is the whole host path, so a tool line naming a memory file would mostly be the key.
+MEMORY_DIR = re.compile(r"/state/projects/[^/\s]+/memory(?=/|\s|$)")
 
 
 def tty():
@@ -37,6 +41,11 @@ def read_json():
         return json.loads(raw)
     except json.JSONDecodeError:
         return raw
+
+
+def short(arg):
+    """A tool's argument as shown: the memory dir reads as `memory`."""
+    return MEMORY_DIR.sub("memory", arg)
 
 
 def preview(text, lines=6):
@@ -68,11 +77,11 @@ def main(argv):
         kind = body.get("error", {}).get("type", "") if isinstance(body, dict) else ""
         out.write(f"\n{RED}✗ API error {argv[2]} {kind}: {msg}{RESET}\n")
     elif cmd == "tool":
-        out.write(f"\n{GREEN}⏺{RESET} {BOLD}{argv[2]}{RESET}({argv[3] if len(argv) > 3 else ''})\n")
+        out.write(f"\n{GREEN}⏺{RESET} {BOLD}{argv[2]}{RESET}({short(argv[3]) if len(argv) > 3 else ''})\n")
     elif cmd in ("result", "call"):
         msg = read_json()
         if cmd == "call":
-            out.write(f"\n{GREEN}⏺{RESET} {BOLD}{argv[2]}{RESET}({argv[3] if len(argv) > 3 else ''})\n")
+            out.write(f"\n{GREEN}⏺{RESET} {BOLD}{argv[2]}{RESET}({short(argv[3]) if len(argv) > 3 else ''})\n")
         for block in msg.get("content", []):
             text = block.get("content", "")
             color = RED if block.get("is_error") else DIM
