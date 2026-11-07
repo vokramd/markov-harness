@@ -35,8 +35,10 @@ one file per workflow:
 | `workflows/agent_step.yaml` | One model call and the tools it asks for |
 | `workflows/extract/memories.yaml`, `extract/step.yaml` | The memory extraction pass: `extract.memories`, `extract.step` |
 | `workflows/tools/*.yaml` | One workflow per tool, named by its path: `tools.bash`, `tools.read_file`, …, `tools.unknown` |
-| `scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`, `skills.py`) |
+| `scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`, `skills.py`, `agents.py`) |
 | `skills/` | Skills that ship with the harness, one `<name>/SKILL.md` folder each (see [Skills](#skills)) |
+| `agents/` | Subagent types that ship with the harness: `general-purpose` and `Explore` (see [Subagents](#subagents)) |
+| `workflows/subagent_step.yaml` | One model call of a subagent and the tools it asks for; `tools.agent` repeats it |
 | `rules.yaml`, `step_types.yaml` | Empty; markov requires them |
 
 markov fingerprints the whole workflow directory to detect edits on resume, and `.state/` changes on every run, so
@@ -70,9 +72,9 @@ each mount with `:z` for SELinux:
 | Host | Container | |
 |---|---|---|
 | `../markov/bin/static/markov` | `/usr/local/bin/markov` | ro |
-| `meta.yaml`, `vars.yaml`, `vars/`, `rules.yaml`, `step_types.yaml`, `workflows/`, `scripts/`, `skills/` | `/harness` (the directory workflow) | ro |
+| `meta.yaml`, `vars.yaml`, `vars/`, `rules.yaml`, `step_types.yaml`, `workflows/`, `scripts/`, `skills/`, `agents/` | `/harness` (the directory workflow) | ro |
 | `.state/relay-api-key` | `/run/secrets/relay-api-key` | ro |
-| `.state/container/` | `/state` (sessions, memory, personal skills, `markov.log`, `markov-state.db`) | rw |
+| `.state/container/` | `/state` (sessions, memory, personal skills and agents, `markov.log`, `markov-state.db`) | rw |
 | `$HARNESS_WORKDIR` (default `$PWD`) | `/work`, the tools' cwd | rw |
 
 The container runs with `--userns=keep-id`, `--cap-drop=all`, `no-new-privileges`, a read-only root with a tmpfs `/tmp`,
@@ -92,6 +94,7 @@ project (`markov-harness`) and can be rotated or revoked from the relay admin AP
 | `write_file` | asks, except `.md` files in the memory dir | Create or replace a file |
 | `edit_file` | asks, after showing the diff, except `.md` files in the memory dir | Replace `old_string` with `new_string`; it must occur exactly once unless `replace_all`. `scripts/edit.py` plans the change, the diff is shown, and `apply` checks again before writing |
 | `skill` | never | Load a skill's instructions (see [Skills](#skills)) |
+| `agent` | never itself; the subagent's own `bash`/`write_file`/`edit_file` ask | Hand a task to a subagent (see [Subagents](#subagents)) |
 | `read_file`, `glob`, `grep` | never | Read-only; several in one reply run in parallel (`concurrency: 4`), each printing its call and result together so they don't interleave. `scripts/search.py` skips `.git`, `node_modules` and the like and stops at 200 results |
 
 Read-only tools in a reply run before the ones that change things; tool calls in one reply are meant to be
@@ -168,6 +171,33 @@ A copy of Claude Code's skills. A skill is a directory with a `SKILL.md`: frontm
 - **Frontmatter honoured:** `disable-model-invocation: true` leaves a skill out of the listing and the tool
   refuses it; `user-invocable: false` refuses `/<name>`. Not (yet): `allowed-tools`, `model`,
   `argument-hint`, plugin and nested skill dirs, and a listing that changes mid-session.
+
+## Subagents
+
+A copy of Claude Code's Agent tool. The main agent hands a task to a subagent, which works in its own
+context (its own session file, system prompt and tools); only its final message comes back, as the tool result.
+
+- **Agent types** are markdown files, `<name>.md`: frontmatter with `name`, `description`, optionally `tools`
+  (a list; Claude Code's names, `Read`, `Grep` and so on, map to the harness's) and `model` (`haiku`, `sonnet`,
+  `opus`, `inherit` or a model id), then the subagent's system prompt. Searched in order, the first of a name
+  winning: `agents/` in this repo (the built-in `general-purpose`, with every tool but `agent`, and `Explore`,
+  read-only), then `/state/agents/` (host: `.state/container/agents/`), then the work dir's `.claude/agents/`.
+- **Listing:** `scripts/agents.py context` snapshots the types to `<session>.agents` at session start, and
+  `history.py messages` adds it as a third `<system-reminder>`: `Available agent types for the agent tool:`, then
+  `- name: description (Tools: ...)` lines.
+- **The tool:** `agent {description, prompt, subagent_type}`. `tools.agent` runs `agents.py start`, which
+  writes the subagent's session, `<session>.agent-<tool_use_id>.jsonl`, with the prompt as its first message,
+  then repeats `subagent_step` while it asks for tools (up to `max_tool_rounds`), and answers with its last
+  text (`agents.py result`). The terminal shows `⏺ Explore(<description>)`, the subagent's tool calls, and
+  `⎿ Done (N tool uses · M model calls)`; its replies aren't streamed.
+- **What a subagent gets:** the identity block, a short preamble (it can't ask questions, its last message is
+  all that comes back) and its type's prompt as the system prompt; the thinking settings and, by default, the
+  main model. Not the main system prompt, the memory or skill listings, or the `agent` tool, so it can't start
+  subagents of its own; a call to a tool it may not use gets an error result.
+- **One at a time:** several `agent` calls in one reply run in turn, after the other tools, because a
+  subagent's `bash`, `write_file` and `edit_file` still ask for approval. Not (yet): running read-only types in
+  parallel, background subagents, resuming a subagent, and a way for the user to start one directly (Claude Code's
+  `@agent-<name>` mention): the user asks in plain words, and the main model decides to call the tool.
 
 ## How it works
 

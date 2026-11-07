@@ -4,9 +4,9 @@
 #
 #   markov binary          -> /usr/local/bin/markov          ro
 #   the workflow files     -> /harness                        ro  (meta.yaml, vars*, rules.yaml,
-#                                                                 step_types.yaml, workflows/, scripts/, skills/)
+#                                                                 step_types.yaml, workflows/, scripts/, skills/, agents/)
 #   relay key              -> /run/secrets/relay-api-key      ro
-#   .state/container/      -> /state   (sessions, memory, skills, markov.log, markov-state.db)
+#   .state/container/      -> /state   (sessions, memory, skills, agents, markov.log, markov-state.db)
 #   $HARNESS_WORKDIR       -> /work    (the tools' cwd; default: the directory you run this from)
 #
 # Every mount gets :z so SELinux-enforcing hosts relabel it for container access.
@@ -68,9 +68,9 @@ if ! podman image exists "$image"; then
     podman build -q -t "$image" -f "$here/container/Containerfile" "$here/container" >&2
 fi
 
-mkdir -p "$state/sessions" "$state/skills"
+mkdir -p "$state/sessions" "$state/skills" "$state/agents"
 workflow_mounts=()
-for part in meta.yaml vars.yaml vars rules.yaml step_types.yaml workflows scripts skills; do
+for part in meta.yaml vars.yaml vars rules.yaml step_types.yaml workflows scripts skills agents; do
     if [ -e "$here/$part" ]; then
         workflow_mounts+=(-v "$here/$part:/harness/$part:ro,z")
     fi
@@ -95,4 +95,4 @@ exec podman run --rm "${tty_flags[@]}" \
     "$image" \
     sh -c 'exec markov run /harness --state-store /state/markov-state.db \
              --callback "tty://?show=text,thinking:dim,output:lines,tool_input:count" --var state_dir=/state --var relay_key_file=/run/secrets/relay-api-key "$@" 2>>/state/markov.log' \
-    harness --var "memory_dir=$memory_dir" --var skills_dir=/state/skills "$@"
+    harness --var "memory_dir=$memory_dir" --var skills_dir=/state/skills --var agents_dir=/state/agents "$@"

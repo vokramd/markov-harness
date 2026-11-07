@@ -14,6 +14,8 @@ markov captures a step's stdout/stderr, so this writes to /dev/tty (falling back
     show.py diff             < edit.py diff JSON
     show.py note <text>      (a dim line: something the harness did on its own)
     show.py skill <name>     < skills.py load message (the skill tool: loaded, or why not)
+    show.py agent <type> <description>   (a subagent starts)
+    show.py agent-done <uses> <rounds> < its tool_result message
     show.py memory           < memory.py tools JSON (a line naming the memory files it changed, if any)
     show.py memory-error <status> < response body JSON or text (the extraction pass's model call failed)
 """
@@ -108,6 +110,15 @@ def main(argv):
             out.write(f"{RED}  ⎿ {result.get('content')}{RESET}\n")
         else:
             out.write(f"{DIM}  ⎿ Successfully loaded skill{RESET}\n")
+    elif cmd == "agent":
+        out.write(f"\n{GREEN}⏺{RESET} {BOLD}{argv[2]}{RESET}({argv[3] if len(argv) > 3 else ''})\n")
+    elif cmd == "agent-done":
+        result = next((b for b in read_json().get("content", []) if b.get("type") == "tool_result"), {})
+        if result.get("is_error"):
+            out.write(f"{RED}  ⎿ {str(result.get('content')).splitlines()[0]}{RESET}\n")
+        else:
+            uses = argv[2]
+            out.write(f"{DIM}  ⎿ Done ({uses} tool use{'' if uses == '1' else 's'} · {argv[3]} model calls){RESET}\n")
     elif cmd == "note":
         out.write(f"{DIM}  ✻ {argv[2]}{RESET}\n")
     elif cmd == "memory":

@@ -28,6 +28,14 @@ steps:
       path: skills.py
       args: [context, "{{ session_path }}.skills", "{{ markov_source_dir }}/skills", "{{ skills_dir }}", "{{ project_skills_dir }}"]
 
+  # Snapshots the agent types for the agent tool (see scripts/agents.py).
+  - name: agents_context
+    type: script_exec
+    params:
+      interpreter: python3
+      path: agents.py
+      args: [context, "{{ session_path }}.agents", "{{ markov_source_dir }}/agents", "{{ agents_dir }}", "{{ project_agents_dir }}"]
+
   # The system blocks and thinking settings every model call sends. Built once here, so
   # agent_step and extract.step send the same bytes and the extraction pass reads the main
   # loop's prompt cache. (A YAML anchor did this when the workflow was one file.)

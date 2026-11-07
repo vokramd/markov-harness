@@ -1,0 +1,82 @@
+# The agent tool: start a subagent (scripts/agents.py), repeat its loop until it stops asking for tools,
+# and answer the main agent with its final message.
+name: tools.agent
+vars:
+  block: null
+  session_file: null
+  relay_api_key: null
+  request_base: null
+steps:
+  - name: start
+    type: script_exec
+    params:
+      interpreter: python3
+      path: agents.py
+      args: [start, "{{ session_file }}", "{{ model }}", "{{ markov_source_dir }}/agents", "{{ agents_dir }}", "{{ project_agents_dir }}"]
+      stdin:
+        block: "{{ block }}"
+        tools: "{{ tools }}"
+    register: start
+
+  - name: parse_start
+    type: set_fact
+    vars:
+      started: "{{ start.stdout | from_json }}"
+
+  - name: announce
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [agent, "{% if started.ok %}{{ started.name }}{% else %}Agent{% endif %}", "{{ block.input.description }}"]
+
+  - name: run
+    workflow: subagent_step
+    when: "started.ok"
+    register: run
+    vars:
+      sub_session: "{{ started.sub_session }}"
+      relay_api_key: "{{ relay_api_key }}"
+      request_base: "{{ request_base }}"
+      agent: "{{ started }}"
+    repeat:
+      until: "not ok or reply.stop_reason != 'tool_use'"
+      max: "{{ max_tool_rounds }}"
+      on_max: stop
+
+  - name: finish
+    type: script_exec
+    when: "started.ok"
+    params:
+      interpreter: python3
+      path: agents.py
+      args: [result, "{{ started.sub_session }}", "{% if not run.last.ok %}failed{% elif run.stopped_by == 'max' %}max{% else %}done{% endif %}"]
+      stdin: "{{ block }}"
+    register: finish
+
+  - name: parse_finish
+    type: set_fact
+    when: "started.ok"
+    vars:
+      outcome: "{{ finish.stdout | from_json }}"
+
+  # Rendered as JSON text, which set_fact reads back as the message map.
+  - name: result
+    type: set_fact
+    vars:
+      message: "{% if started.ok %}{{ outcome.message | to_json }}{% else %}{{ started.message | to_json }}{% endif %}"
+
+  - name: record
+    type: write_file
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ message | to_json }}\n"
+
+  - name: show
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [agent-done, "{% if started.ok %}{{ outcome.uses }}{% else %}0{% endif %}", "{% if started.ok %}{{ outcome.rounds }}{% else %}0{% endif %}"]
+      stdin: "{{ message }}"

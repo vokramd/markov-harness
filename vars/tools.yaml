@@ -81,3 +81,22 @@ tools:
         skill: {type: string, description: "The skill name, e.g. \"commit\" or \"review-pr\"."}
         args: {type: string, description: Optional arguments for the skill.}
       required: [skill]
+  # Claude Code's Agent tool. The agent types arrive as a <system-reminder> in the first user message
+  # (scripts/agents.py context); the subagent's final message comes back as the tool result.
+  - name: agent
+    description: >-
+      Launch a subagent to handle a task on its own. The subagent starts with a fresh context: it knows only
+      the prompt you give it, works with its own tools, and returns only its final message, which the user
+      does not see unless you relay it. Use it for searches or investigations whose intermediate results you
+      don't need, to keep them out of this conversation. Pick subagent_type from the available agent types
+      listed in the system reminder; Explore is read-only. Brief it like a colleague who hasn't seen this
+      conversation: the goal, what you already know, where to look, and what to report. Don't use it for a
+      lookup you could do in one or two tool calls yourself. Subagents run one at a time.
+    eager_input_streaming: true
+    input_schema:
+      type: object
+      properties:
+        description: {type: string, description: A short (3-5 word) description of the task.}
+        prompt: {type: string, description: The task for the subagent.}
+        subagent_type: {type: string, description: "The agent type to use; default general-purpose."}
+      required: [description, prompt]

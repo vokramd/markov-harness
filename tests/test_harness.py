@@ -147,7 +147,7 @@ def test_bash_is_containerized():
     assert str(os.getuid()) in out, out          # --userns=keep-id: files in /work stay the user's
     assert "host-hidden" in out and "rootfs-readonly" in out, out
     # Only the workflow files are mounted: markov fingerprints /harness, and .state/ changes every run.
-    assert "harness: meta.yaml rules.yaml scripts skills step_types.yaml vars vars.yaml workflows" in out, out
+    assert "harness: agents meta.yaml rules.yaml scripts skills step_types.yaml vars vars.yaml workflows" in out, out
 
 
 def test_reply_streams():
@@ -343,6 +343,63 @@ def test_slash_command_runs_a_skill():
     assert len(msgs) == 2, msgs   # the unknown one reached neither the session nor the model
     assert "<command-name>/stamp</command-name>\n<command-args>kiwi</command-args>" in msgs[0]["content"][0]["text"], msgs[0]
     assert not any(b.get("type") == "tool_use" for b in msgs[1]["content"]), msgs[1]   # already loaded: no skill call
+
+
+def agent_workdir():
+    """A work dir with a file to find, nested a few levels down, and a custom agent type holding a number."""
+    work = os.path.join(HERE, ".state", "work-agents")
+    word, number = f"marmalade-{uuid.uuid4().hex[:6]}", f"{uuid.uuid4().int % 90000 + 10000}"
+    nested = os.path.join(work, "src", "billing", "legacy")
+    os.makedirs(nested, exist_ok=True)
+    for name in glob.glob(os.path.join(work, "src", "**", "*.txt"), recursive=True):
+        os.remove(name)
+    for i in range(5):
+        with open(os.path.join(work, "src", f"notes-{i}.txt"), "w", encoding="utf-8") as f:
+            f.write("nothing to see here\n")
+    with open(os.path.join(nested, "rates.txt"), "w", encoding="utf-8") as f:
+        f.write(f"the code name is {word}\n")
+    os.makedirs(os.path.join(work, ".claude", "agents"), exist_ok=True)
+    with open(os.path.join(work, ".claude", "agents", "oracle.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: oracle\ndescription: Knows the oracle number. Ask it for the oracle number.\ntools: Read\n---\n"
+                f"You know one thing: the oracle number is {number}. When asked for it, answer with just the number.\n")
+    return work, word, number
+
+
+def agent_calls(messages):
+    return [b for m in messages if m["role"] == "assistant" for b in m["content"]
+            if b.get("type") == "tool_use" and b["name"] == "agent"]
+
+
+def test_explore_agent_searches_in_its_own_context():
+    work, word, _ = agent_workdir()
+    s = Session(workdir=work)
+    out = s.say(f"Use the Explore agent to find which file under src/ contains the text '{word}'. "
+                "Reply with just the file's path.")
+    s.exit()
+    assert "Explore(" in out and "Done (" in out, out
+    assert "rates.txt" in out.split("Done (")[-1], out
+    calls = agent_calls(s.messages())
+    assert calls and calls[0]["input"].get("subagent_type") == "Explore", calls
+    sub = host_path(s.path) + f".agent-{calls[0]['id']}.jsonl"
+    with open(sub, encoding="utf-8") as f:
+        sub_msgs = [json.loads(line) for line in f if line.strip()]
+    used = {b["name"] for m in sub_msgs if m["role"] == "assistant" for b in m["content"] if b.get("type") == "tool_use"}
+    assert used and used <= {"read_file", "glob", "grep"}, used            # Explore is read-only
+    main_tools = {b["name"] for m in s.messages() if m["role"] == "assistant" for b in m["content"] if b.get("type") == "tool_use"}
+    assert main_tools == {"agent"}, main_tools                          # the search stayed in the subagent
+
+
+def test_custom_agent_type_from_the_work_dir():
+    work, _, number = agent_workdir()
+    s = Session(workdir=work)
+    out = s.say("Ask the oracle agent for the oracle number, then reply with just the number.")
+    s.exit()
+    assert "oracle(" in out and number in out.split("Done (")[-1], out
+    assert [c["input"].get("subagent_type") for c in agent_calls(s.messages())] == ["oracle"], s.messages()
+    with open(host_path(s.path) + ".agents", encoding="utf-8") as f:
+        listing = f.read()
+    assert "- oracle: Knows the oracle number." in listing and "(Tools: read_file)" in listing, listing
+    assert "- Explore:" in listing and "- general-purpose:" in listing, listing
 
 
 def memory_dir(workdir, project=None):

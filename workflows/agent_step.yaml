@@ -10,7 +10,7 @@ steps:
     params:
       interpreter: python3
       path: history.py
-      args: [messages, "{{ session_file }}", "{{ session_file }}.context", "{{ session_file }}.skills"]
+      args: [messages, "{{ session_file }}", "{{ session_file }}.context", "{{ session_file }}.skills", "{{ session_file }}.agents"]
     register: history
 
   - name: reply_gap
@@ -123,11 +123,25 @@ steps:
       block: "{{ block }}"
       session_file: "{{ session_file }}"
 
+  # Subagents, after the other tools: one at a time, since their own tools may ask for approval.
+  - name: run_agents
+    when: "ok"
+    for_each: reply.content
+    as: block
+    for_each_when: "block.type == 'tool_use' and block.name in agent_tools and not (block.id in reply.invalid)"
+    concurrency: 1
+    workflow: "tools.{{ block.name }}"
+    vars:
+      block: "{{ block }}"
+      session_file: "{{ session_file }}"
+      relay_api_key: "{{ relay_api_key }}"
+      request_base: "{{ request_base }}"
+
   - name: unknown_tools
     when: "ok"
     for_each: reply.content
     as: block
-    for_each_when: "block.type == 'tool_use' and (block.id in reply.invalid or not (block.name in readonly_tools or block.name in mutating_tools))"
+    for_each_when: "block.type == 'tool_use' and (block.id in reply.invalid or not (block.name in readonly_tools or block.name in mutating_tools or block.name in agent_tools))"
     workflow: tools.unknown
     vars:
       block: "{{ block }}"
