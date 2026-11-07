@@ -17,6 +17,8 @@
 #
 #   bin/harness [--var k=v ...]
 #   HARNESS_WORKDIR=~/src/project bin/harness
+#   HARNESS_PROJECT_ID=myproject bin/harness    # memory shared by every work dir with this ID
+#   bin/harness --print-memory-dir             # where this work dir's memory lives on the host
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,8 +28,25 @@ workdir="$(realpath "${HARNESS_WORKDIR:-$PWD}")"
 state="$here/.state/container"
 key="$here/.state/relay-api-key"
 relay_host="relay-api.local"
-# One memory dir per work dir, keyed like Claude Code's projects/<key>/memory: every non-alphanumeric -> '-'.
-memory_dir="/state/projects/$(printf '%s' "$workdir" | sed 's/[^A-Za-z0-9]/-/g')/memory"
+# One memory dir per project, /state/projects/<key>/memory. The project is the work dir, keyed like
+# Claude Code's (every non-alphanumeric -> '-') plus a hash of the full path, since the slug alone
+# collides (/a/b-c and /a/b/c). HARNESS_PROJECT_ID names the project instead, so several work dirs
+# (checkouts, worktrees, a moved dir) can share one memory; a path key starts with '-', so an ID can't
+# collide with one.
+if [ -n "${HARNESS_PROJECT_ID:-}" ]; then
+    [[ "$HARNESS_PROJECT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+        echo "harness: HARNESS_PROJECT_ID must be letters, digits, '.', '_' or '-', starting with a letter or digit" >&2
+        exit 2
+    }
+    project_key="$HARNESS_PROJECT_ID"
+else
+    project_key="$(printf '%s' "$workdir" | sed 's/[^A-Za-z0-9]/-/g')-$(printf '%s' "$workdir" | sha256sum | cut -c1-8)"
+fi
+memory_dir="/state/projects/$project_key/memory"
+if [ "${1:-}" = "--print-memory-dir" ]; then   # the host path, for tests and scripts
+    echo "$state/projects/$project_key/memory"
+    exit 0
+fi
 
 # :z relabels what it mounts; refuse directories where that (or exposing them to tools) is a bad idea.
 case "$workdir" in

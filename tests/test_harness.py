@@ -9,6 +9,7 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -26,12 +27,15 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class Session:
-    def __init__(self, *args, workdir=WORK, extract=False):
+    def __init__(self, *args, workdir=WORK, extract=False, project=None):
         # Extraction is off except in the memory tests: it adds a model call per turn, and what it saves
         # in the shared work dir's memory would leak into later tests.
         args = ["--var", f"model={MODEL}", "--var", f"extract_memories={str(extract).lower()}", *args]
         os.makedirs(workdir, exist_ok=True)
         env = {**os.environ, "HARNESS_WORKDIR": workdir}
+        env.pop("HARNESS_PROJECT_ID", None)
+        if project:
+            env["HARNESS_PROJECT_ID"] = project
         self.child = pexpect.spawn(HARNESS, args, cwd=HERE, env=env, encoding="utf-8", timeout=TIMEOUT)
         if os.environ.get("VERBOSE"):
             self.child.logfile_read = sys.stdout
@@ -263,9 +267,11 @@ def test_tool_rounds_are_capped():
 
 def test_memory_index_loaded_and_writes_need_no_approval():
     work = os.path.join(HERE, ".state", "work-memory")
-    run_dir = f"test-memory/{uuid.uuid4().hex[:8]}"         # a fresh memory dir, so earlier runs can't interfere
+    run_dir = "test-memory"   # this test's own memory dir, emptied first so earlier runs can't interfere
     memory = os.path.join(STATE, run_dir)
-    os.makedirs(memory)
+    os.makedirs(memory, exist_ok=True)
+    for name in glob.glob(os.path.join(memory, "*.md")):
+        os.remove(name)
     host, shell = f"tangerine-{uuid.uuid4().hex[:6]}", f"vermilion-{uuid.uuid4().hex[:6]}"
     with open(os.path.join(memory, "MEMORY.md"), "w", encoding="utf-8") as f:
         f.write(f"- [Deploy host](deploy.md) — the deploy host is {host}\n")
@@ -339,6 +345,43 @@ def test_slash_command_runs_a_skill():
     assert not any(b.get("type") == "tool_use" for b in msgs[1]["content"]), msgs[1]   # already loaded: no skill call
 
 
+def memory_dir(workdir, project=None):
+    """Where bin/harness keeps this work dir's (or project's) memory on the host."""
+    env = {k: v for k, v in os.environ.items() if k != "HARNESS_PROJECT_ID"}
+    env["HARNESS_WORKDIR"] = workdir
+    if project:
+        env["HARNESS_PROJECT_ID"] = project
+    os.makedirs(workdir, exist_ok=True)
+    return subprocess.run([HARNESS, "--print-memory-dir"], env=env, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_memory_keys_dont_collide():
+    # The slug alone maps both to ...-work-key-b-c; the path hash keeps them apart.
+    a, b = (os.path.join(HERE, ".state", "work-key", *p) for p in (["b-c"], ["b", "c"]))
+    assert memory_dir(a) != memory_dir(b), memory_dir(a)
+    assert memory_dir(a) == memory_dir(a)
+    assert memory_dir(a, project="shared") == memory_dir(b, project="shared") == os.path.join(STATE, "projects", "shared", "memory")
+    bad = subprocess.run([HARNESS, "--print-memory-dir"], env={**os.environ, "HARNESS_PROJECT_ID": "../up"},
+                         capture_output=True, text=True)
+    assert bad.returncode == 2 and "HARNESS_PROJECT_ID" in bad.stderr, bad
+
+
+def test_project_id_shares_memory_across_work_dirs():
+    project = "test-project-id"
+    memory = memory_dir(WORK, project=project)
+    os.makedirs(memory, exist_ok=True)
+    for name in glob.glob(os.path.join(memory, "*.md")):
+        os.remove(name)
+    port = f"{uuid.uuid4().int % 50000 + 10000}"
+    with open(os.path.join(memory, "MEMORY.md"), "w", encoding="utf-8") as f:
+        f.write(f"- [Dev port](dev-port.md) — the dev server port is {port}\n")
+    # A work dir that has never been used: only the project ID can lead it to that memory.
+    s = Session(workdir=os.path.join(HERE, ".state", "work-key", "b", "c"), project=project)
+    out = s.say("According to your memory index, what is the dev server port? Reply with just the number.")
+    assert port in out, out
+    s.exit()
+
+
 def host_path(path):
     return os.path.join(STATE, os.path.relpath(path, "/state"))
 
@@ -351,8 +394,7 @@ def fork_tool_calls(fork):
 
 def test_memory_extracted_after_turn():
     work = os.path.join(HERE, ".state", "work-extract")
-    key = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(work))
-    memory = os.path.join(STATE, "projects", key, "memory")
+    memory = memory_dir(work)
     editor = f"kakoune-{uuid.uuid4().hex[:6]}"
     s = Session(workdir=work, extract=True)
     # A lasting preference, stated in passing; the main agent answers without tools, then the pass saves it.

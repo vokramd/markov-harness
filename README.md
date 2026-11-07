@@ -10,6 +10,7 @@ model-relay, runs the tools the model asks for, and prints the reply.
 make -C ../markov build-static                         # once: CGO_ENABLED=0 markov at ../markov/bin/static/markov
 bin/harness                                            # new session; tools act on $PWD (mounted at /work)
 HARNESS_WORKDIR=~/src/project bin/harness              # tools act on another dir
+HARNESS_PROJECT_ID=myproject bin/harness               # share one memory across work dirs
 bin/harness --var session=/state/sessions/<id>.jsonl   # resume one
 bin/harness --var approve=auto                         # run tools without asking
 bin/harness --var model=claude-sonnet-5-5
@@ -102,9 +103,18 @@ the model writes it; `history.py assemble` checks the input is a JSON object, an
 
 A copy of Claude Code's auto-memory (2.1.319, lean prompt variant), kept in the runtime folder instead of `~/.claude`:
 
-- **Where:** `/state/projects/<key>/memory/` (host: `.state/container/projects/<key>/memory/`), where `<key>` is the
-  host work dir with every non-alphanumeric character replaced by `-`. So each `HARNESS_WORKDIR` has its own memory.
-  `bin/harness` passes it as `memory_dir`; `--var memory_dir=...` overrides it.
+- **Where:** `/state/projects/<key>/memory/` (host: `.state/container/projects/<key>/memory/`), one per project, shared by
+  every session in it. By default the project is the work dir: `<key>` is the host path with every non-alphanumeric
+  character replaced by `-`, as in Claude Code, plus 8 hex of the path's SHA-256, because the slug alone collides
+  (`/a/b-c` and `/a/b/c`). `HARNESS_PROJECT_ID=<id>` makes `<key>` the ID instead, so several work dirs (checkouts,
+  worktrees, a moved directory) share one memory; a path key starts with `-` and an ID can't, so they never collide.
+  `bin/harness --print-memory-dir` prints the host path. `bin/harness` passes it as `memory_dir`;
+  `--var memory_dir=...` overrides it.
+- **Why per project, not one global memory:** most memories are about the code (`python` is missing here, the deploy
+  host), and one shared store would put them in unrelated projects' prompts, share one 200-line index between all of
+  them, and have concurrent sessions write one `MEMORY.md` with no locking. A user-level layer for facts that hold
+  everywhere is a possible addition, routed by scope rather than by memory type, since feedback is often about one
+  project.
 - **Prompt:** a third system block with Claude Code's `# Memory` section: one fact per file with
   `name`/`description`/`metadata.type` frontmatter, plus a one-line pointer in `MEMORY.md`.
 - **Index:** at session start, `scripts/memory.py context` creates the dir and snapshots `MEMORY.md` (cut at 200 lines,
@@ -125,7 +135,8 @@ A copy of Claude Code's auto-memory (2.1.319, lean prompt variant), kept in the 
   - **Limits:** at most `extract_max_turns` (5) calls per pass; `--var extract_memories=false` turns it off. It runs
     in line, before the next prompt (markov has no background steps), so it adds a model call to each qualifying turn.
 
-The tests turn extraction off except in the two memory tests, which use their own work dir or a fresh `--var memory_dir`.
+The tests turn extraction off except in the two memory tests, which use their own work dir or their own `--var memory_dir`
+(emptied first), and find memory dirs with `--print-memory-dir`.
 
 Not copied (yet): relevance-selected recall and periodic consolidation ("dream").
 

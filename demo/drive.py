@@ -10,6 +10,7 @@ character at a time and every approval is answered "y".
 """
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -92,9 +93,10 @@ def main(argv):
     time.sleep(1.5)
     for turns in SESSIONS:
         run_session(workdir, turns)
-    key = re.sub(r"[^A-Za-z0-9]", "-", workdir)
-    shell_line(f"cat .state/container/projects/*{re.sub(r'[^A-Za-z0-9]', '-', os.path.basename(workdir))}/memory/MEMORY.md")
-    with open(os.path.join(HERE, ".state", "container", "projects", key, "memory", "MEMORY.md"), encoding="utf-8") as f:
+    memory = subprocess.run([os.path.join(HERE, "bin", "harness"), "--print-memory-dir"], capture_output=True, text=True,
+                            check=True, env={**os.environ, "HARNESS_WORKDIR": workdir}).stdout.strip()
+    shell_line(f"cat .state/container/projects/*{re.sub(r'[^A-Za-z0-9]', '-', os.path.basename(workdir))}-*/memory/MEMORY.md")
+    with open(os.path.join(memory, "MEMORY.md"), encoding="utf-8") as f:
         sys.stdout.write(f.read().replace("\n", "\r\n"))
     time.sleep(3)
 
