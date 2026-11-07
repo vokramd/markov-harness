@@ -402,6 +402,33 @@ def test_custom_agent_type_from_the_work_dir():
     assert "- Explore:" in listing and "- general-purpose:" in listing, listing
 
 
+def test_agent_mention_asks_for_that_agent():
+    work, _, number = agent_workdir()
+    s = Session(workdir=work)
+    out = s.say("@agent-oracle what is the oracle number? Reply with just the number.")
+    s.exit()
+    assert "asked for agent oracle" in out and number in out.split("Done (")[-1], out
+    first = s.messages()[0]["content"]
+    assert 'invoke the agent "oracle"' in first[1]["text"], first     # the reminder, after the typed text
+    assert [c["input"].get("subagent_type") for c in agent_calls(s.messages())] == ["oracle"], s.messages()
+
+
+def test_agent_command_runs_without_the_model():
+    work, _, number = agent_workdir()
+    s = Session(workdir=work)
+    out = s.say("/agent oracle What is the oracle number?")
+    assert "oracle(/agent oracle What is the oracle number?)" in out and number in out.split("Done (")[-1], out
+    assert len(s.messages()) == 1, s.messages()                     # the command and its output; no model reply
+    recorded = s.messages()[0]["content"]
+    assert "<command-name>/agent</command-name>" in recorded[0]["text"], recorded
+    assert recorded[1]["text"].startswith("<local-command-stdout>") and number in recorded[1]["text"], recorded
+    out = s.say("/agent no-such-type do it")
+    assert "Unknown agent type: no-such-type" in out, out
+    out = s.say("What number did the oracle just give? Reply with just the number.")
+    assert number in out, out                                        # the model sees the command's output
+    s.exit()
+
+
 def memory_dir(workdir, project=None):
     """Where bin/harness keeps this work dir's (or project's) memory on the host."""
     env = {k: v for k, v in os.environ.items() if k != "HARNESS_PROJECT_ID"}

@@ -35,10 +35,10 @@ one file per workflow:
 | `workflows/agent_step.yaml` | One model call and the tools it asks for |
 | `workflows/extract/memories.yaml`, `extract/step.yaml` | The memory extraction pass: `extract.memories`, `extract.step` |
 | `workflows/tools/*.yaml` | One workflow per tool, named by its path: `tools.bash`, `tools.read_file`, …, `tools.unknown` |
-| `scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`, `skills.py`, `agents.py`) |
+| `scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`, `skills.py`, `agents.py`, `input.py`) |
 | `skills/` | Skills that ship with the harness, one `<name>/SKILL.md` folder each (see [Skills](#skills)) |
 | `agents/` | Subagent types that ship with the harness: `general-purpose` and `Explore` (see [Subagents](#subagents)) |
-| `workflows/subagent_step.yaml` | One model call of a subagent and the tools it asks for; `tools.agent` repeats it |
+| `workflows/subagent_step.yaml`, `agent/run.yaml` | A subagent: one model call and its tools, and `agent.run`, which starts one, repeats that and collects its answer (for the tool and for `/agent`) |
 | `rules.yaml`, `step_types.yaml` | Empty; markov requires them |
 
 markov fingerprints the whole workflow directory to detect edits on resume, and `.state/` changes on every run, so
@@ -194,10 +194,16 @@ context (its own session file, system prompt and tools); only its final message 
   all that comes back) and its type's prompt as the system prompt; the thinking settings and, by default, the
   main model. Not the main system prompt, the memory or skill listings, or the `agent` tool, so it can't start
   subagents of its own; a call to a tool it may not use gets an error result.
+- **The user can start one** two ways (`scripts/input.py`):
+  - **`@agent-<name>`** anywhere in a message, naming an agent type: the message goes to the model with Claude Code's
+    reminder after it (`The user has expressed a desire to invoke the agent "<name>"...`), so the model calls it,
+    writing the prompt itself. A name that is no agent type stays plain text.
+  - **`/agent <type> <task>`**: the workflow runs the subagent itself, with no main-model call (`agent.run`, the same
+    loop the tool uses), prints its answer, and records the command and its output the way Claude Code records a
+    local command (`<command-name>`/`<command-args>`, then `<local-command-stdout>`), so the model sees it next turn.
 - **One at a time:** several `agent` calls in one reply run in turn, after the other tools, because a
   subagent's `bash`, `write_file` and `edit_file` still ask for approval. Not (yet): running read-only types in
-  parallel, background subagents, resuming a subagent, and a way for the user to start one directly (Claude Code's
-  `@agent-<name>` mention): the user asks in plain words, and the main model decides to call the tool.
+  parallel, background subagents, and resuming a subagent.
 
 ## How it works
 

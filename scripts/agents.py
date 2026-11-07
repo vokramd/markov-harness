@@ -3,7 +3,7 @@ prompt, tools and conversation, and only its final answer comes back as the tool
 
     python3 agents.py context <out> <dir>...                 -> writes the listing reminder to out
     python3 agents.py start <session> <model> <dir>... < {block, tools}   -> {ok, error, ...} (see start)
-    python3 agents.py result <sub_session> <status> < tool_use block       -> {message, uses, rounds}
+    python3 agents.py result <sub_session> <status> < tool_use block       -> {message, text, error, uses, rounds}
 
 An agent type is a markdown file, <dir>/<name>.md: frontmatter with `name`, `description`, and optionally
 `tools` (a comma-separated or [bracketed] list; default every tool but the agent tool) and `model`
@@ -130,7 +130,8 @@ def result(sub_session, status, block):
     content = {"type": "tool_result", "tool_use_id": block.get("id"), "content": error or text}
     if error:
         content["is_error"] = True
-    return {"message": {"role": "user", "content": [content]}, "uses": uses, "rounds": len(replies)}
+    return {"message": {"role": "user", "content": [content]}, "text": text, "error": error,
+            "uses": uses, "rounds": len(replies)}
 
 
 def main(argv):

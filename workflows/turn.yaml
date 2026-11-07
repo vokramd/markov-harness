@@ -16,15 +16,18 @@ steps:
     vars:
       quit: "user_input.value == '/exit' or user_input.value == '/quit'"
 
-  # Plain text stays as typed; /<skill> [args] becomes the skill's instructions (scripts/skills.py).
+  # What was typed (scripts/input.py): plain text, @agent-<name> mentions (a reminder added), a
+  # /<skill> [args] (the skill's instructions), or /agent <type> <task> (run here, no model call).
   - name: expand
     type: script_exec
     when: "not quit"
     params:
       interpreter: python3
-      path: skills.py
-      args: [user, "{{ markov_source_dir }}/skills", "{{ skills_dir }}", "{{ project_skills_dir }}"]
-      stdin: "{{ user_input }}"
+      path: input.py
+      stdin:
+        value: "{{ user_input.value }}"
+        skill_dirs: ["{{ markov_source_dir }}/skills", "{{ skills_dir }}", "{{ project_skills_dir }}"]
+        agent_dirs: ["{{ markov_source_dir }}/agents", "{{ agents_dir }}", "{{ project_agents_dir }}"]
     register: expand
 
   - name: user_msg
@@ -37,16 +40,70 @@ steps:
     type: set_fact
     when: "not quit"
     vars:
-      send: "not expanded.error"
+      send: "not expanded.error and not expanded.command"
+      direct: "expanded.command and not expanded.error"
       message: "{{ expanded.message }}"
 
   - name: show_expand
     type: script_exec
-    when: "not quit and (expanded.error or expanded.skill)"
+    when: "not quit and (expanded.error or expanded.skill or expanded.mentions)"
     params:
       interpreter: python3
       path: show.py
-      args: [note, "{% if expanded.error %}{{ expanded.error }}{% else %}loaded skill {{ expanded.skill }}{% endif %}"]
+      args: [note, "{% if expanded.error %}{{ expanded.error }}{% elif expanded.skill %}loaded skill {{ expanded.skill }}{% else %}asked for agent {{ expanded.mentions | join:', ' }}{% endif %}"]
+
+  # /agent <type> <task>: the workflow runs the subagent itself, prints its answer, and records the
+  # command and its output the way Claude Code records a local command, for the model's next turn.
+  - name: command_block
+    type: set_fact
+    when: "not quit and direct"
+    vars:
+      block:
+        id: "cmd-{{ markov_current_run_id }}"
+        name: agent
+        input:
+          description: "/agent {{ expanded.command.args }}"
+          prompt: "{{ expanded.command.prompt }}"
+          subagent_type: "{{ expanded.command.subagent_type }}"
+
+  - name: command_agent
+    workflow: agent.run
+    when: "not quit and direct"
+    register: command_agent
+    vars:
+      block: "{{ block }}"
+      session_file: "{{ session_file }}"
+      relay_api_key: "{{ relay_api_key }}"
+      request_base: "{{ request_base }}"
+
+  - name: command_msg
+    type: set_fact
+    when: "not quit and direct"
+    vars:
+      command_message:
+        role: user
+        content:
+          - type: text
+            text: "<command-name>/agent</command-name>\n<command-args>{{ expanded.command.args }}</command-args>"
+          - type: text
+            text: "<local-command-stdout>{% if command_agent.outcome.error %}{{ command_agent.outcome.error }}{% else %}{{ command_agent.outcome.text }}{% endif %}</local-command-stdout>"
+
+  - name: record_command
+    type: write_file
+    when: "not quit and direct"
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ command_message | to_json }}\n"
+
+  - name: show_command
+    type: script_exec
+    when: "not quit and direct and not command_agent.outcome.error"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [answer]
+      stdin: "{{ command_agent.outcome.text }}"
 
   - name: record_user
     type: write_file
