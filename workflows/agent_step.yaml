@@ -1,16 +1,37 @@
-# One model call, plus the tools it asked for; turn repeats it while the model wants tool results.
+# One model call, plus the tools it asked for; turn repeats it while keep_going: the model wants
+# tool results, or a Stop hook sent it back to work.
 name: agent_step
 vars:
   session_file: null
   relay_api_key: null
   request_base: null
 steps:
+  # Compact first if the last call's context reached compact_at (scripts/compact.py), so a long
+  # turn is compacted between its tool rounds too.
+  - name: compact_check
+    type: script_exec
+    params:
+      interpreter: python3
+      path: compact.py
+      args: [check, "{{ session_file }}", "{{ compact_at }}"]
+    register: compact_check
+
+  - name: compact
+    workflow: compact
+    when: "compact_check.stdout == 'true'"
+    vars:
+      session_file: "{{ session_file }}"
+      relay_api_key: "{{ relay_api_key }}"
+      request_base: "{{ request_base }}"
+      manual: false
+      instructions: ""
+
   - name: build
     type: script_exec
     params:
       interpreter: python3
       path: history.py
-      args: [messages, "{{ session_file }}", "{{ session_file }}.context", "{{ session_file }}.skills", "{{ session_file }}.agents"]
+      args: [messages, "{{ session_file }}", "{{ session_file }}.instructions", "{{ session_file }}.context", "{{ session_file }}.skills", "{{ session_file }}.agents"]
     register: history
 
   - name: reply_gap
@@ -47,7 +68,7 @@ steps:
         messages: "{{ history.stdout | from_json }}"
     register: response
 
-  # The stream's events back into one message: {content, stop_reason, usage}, or {error, status}.
+  # The stream's events back into one message: {content, stop_reason, usage, context_tokens}, or {error, status}.
   - name: assemble
     type: script_exec
     params:
@@ -66,6 +87,7 @@ steps:
     type: set_fact
     vars:
       ok: "not reply.error"
+      stop_blocked: false
 
   - name: show_error
     type: script_exec
@@ -92,6 +114,14 @@ steps:
       append: true
       content: "{{ message | to_json }}\n"
 
+  # The context size, for compact_check before the next call.
+  - name: record_usage
+    type: write_file
+    when: "ok"
+    params:
+      path: "{{ session_file }}.usage"
+      content: "{{ reply.context_tokens }}"
+
   - name: show_reply
     type: script_exec
     when: "ok"
@@ -101,49 +131,173 @@ steps:
       args: [reply]
       stdin: "{{ reply }}"
 
+  # Decides each tool call before it runs: PreToolUse hooks, permission rules, approve and the
+  # memory dir give allow, ask or deny (scripts/hooks.py pre). A hook may also change the input.
+  - name: gate
+    type: script_exec
+    when: "ok"
+    params:
+      interpreter: python3
+      path: hooks.py
+      args: [pre, "{{ session_file }}", "{{ user_settings }}"]
+      stdin:
+        reply: "{{ reply }}"
+        approve: "{{ approve }}"
+        memory_dir: "{{ memory_dir }}"
+        mutating_tools: "{{ mutating_tools }}"
+    register: gate
+
+  - name: parse_gate
+    type: set_fact
+    when: "ok"
+    vars:
+      gated: "{{ gate.stdout | from_json }}"
+
+  - name: show_gate_notes
+    type: script_exec
+    when: "ok and gated.notes | length > 0"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [notes]
+      stdin: "{{ gated.notes }}"
+
   - name: run_readonly
     when: "ok"
-    for_each: reply.content
-    as: block
-    for_each_when: "block.type == 'tool_use' and block.name in readonly_tools and not (block.id in reply.invalid)"
+    for_each: gated.calls
+    as: call
+    for_each_when: "call.decision != 'deny' and call.block.name in readonly_tools and not (call.block.id in reply.invalid)"
     concurrency: 4         # read-only tools in parallel
-    workflow: "tools.{{ block.name }}"
+    workflow: "tools.{{ call.block.name }}"
     vars:
-      block: "{{ block }}"
+      block: "{{ call.block }}"
       session_file: "{{ session_file }}"
 
   - name: run_mutating
     when: "ok"
-    for_each: reply.content
-    as: block
-    for_each_when: "block.type == 'tool_use' and block.name in mutating_tools and not (block.id in reply.invalid)"
+    for_each: gated.calls
+    as: call
+    for_each_when: "call.decision != 'deny' and call.block.name in mutating_tools and not (call.block.id in reply.invalid)"
     concurrency: 1
-    workflow: "tools.{{ block.name }}"
+    workflow: "tools.{{ call.block.name }}"
     vars:
-      block: "{{ block }}"
+      block: "{{ call.block }}"
       session_file: "{{ session_file }}"
+      decision: "{{ call.decision }}"
+      reason: "{{ call.reason }}"
+      suggest: "{{ call.suggest }}"
 
   # Subagents, after the other tools: one at a time, since their own tools may ask for approval.
   - name: run_agents
     when: "ok"
-    for_each: reply.content
-    as: block
-    for_each_when: "block.type == 'tool_use' and block.name in agent_tools and not (block.id in reply.invalid)"
+    for_each: gated.calls
+    as: call
+    for_each_when: "call.decision != 'deny' and call.block.name in agent_tools and not (call.block.id in reply.invalid)"
     concurrency: 1
-    workflow: "tools.{{ block.name }}"
+    workflow: "tools.{{ call.block.name }}"
     vars:
-      block: "{{ block }}"
+      block: "{{ call.block }}"
       session_file: "{{ session_file }}"
       relay_api_key: "{{ relay_api_key }}"
       request_base: "{{ request_base }}"
 
+  - name: denied_tools
+    when: "ok"
+    for_each: gated.calls
+    as: call
+    for_each_when: "call.decision == 'deny'"
+    workflow: tools.denied
+    vars:
+      block: "{{ call.block }}"
+      session_file: "{{ session_file }}"
+      reason: "{{ call.reason }}"
+
   - name: unknown_tools
     when: "ok"
-    for_each: reply.content
-    as: block
-    for_each_when: "block.type == 'tool_use' and (block.id in reply.invalid or not (block.name in readonly_tools or block.name in mutating_tools or block.name in agent_tools))"
+    for_each: gated.calls
+    as: call
+    for_each_when: "call.decision != 'deny' and (call.block.id in reply.invalid or not (call.block.name in readonly_tools or call.block.name in mutating_tools or call.block.name in agent_tools))"
     workflow: tools.unknown
     vars:
-      block: "{{ block }}"
+      block: "{{ call.block }}"
       session_file: "{{ session_file }}"
-      invalid: "{{ block.id in reply.invalid }}"
+      invalid: "{{ call.block.id in reply.invalid }}"
+
+  # PostToolUse hooks, once the calls have their results: what they say goes to the model as reminders.
+  - name: post_hooks
+    type: script_exec
+    when: "ok and gated.post"
+    params:
+      interpreter: python3
+      path: hooks.py
+      args: [post, "{{ session_file }}", "{{ user_settings }}"]
+      stdin:
+        calls: "{{ gated.calls }}"
+    register: post_hooks
+
+  - name: parse_post
+    type: set_fact
+    when: "ok and gated.post"
+    vars:
+      posted: "{{ post_hooks.stdout | from_json }}"
+
+  - name: record_post
+    type: write_file
+    when: "ok and gated.post and posted.message"
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ posted.message | to_json }}\n"
+
+  - name: show_post_notes
+    type: script_exec
+    when: "ok and gated.post and posted.notes | length > 0"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [notes]
+      stdin: "{{ posted.notes }}"
+
+  # Stop hooks, when the model is done: one may send it back to work with a reason.
+  - name: stop_hooks
+    type: script_exec
+    when: "ok and reply.stop_reason != 'tool_use'"
+    params:
+      interpreter: python3
+      path: hooks.py
+      args: [stop, "{{ session_file }}", "{{ user_settings }}"]
+    register: stop_hooks
+
+  - name: parse_stop
+    type: set_fact
+    when: "ok and reply.stop_reason != 'tool_use'"
+    vars:
+      stopped: "{{ stop_hooks.stdout | from_json }}"
+
+  - name: record_stop
+    type: write_file
+    when: "ok and reply.stop_reason != 'tool_use' and stopped.block"
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ stopped.message | to_json }}\n"
+
+  - name: show_stop
+    type: script_exec
+    when: "ok and reply.stop_reason != 'tool_use' and stopped.notes | length > 0"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [notes]
+      stdin: "{{ stopped.notes }}"
+
+  - name: stop_check
+    type: set_fact
+    when: "ok and reply.stop_reason != 'tool_use'"
+    vars:
+      stop_blocked: "stopped.block"
+
+  - name: loop
+    type: set_fact
+    vars:
+      keep_going: "ok and (reply.stop_reason == 'tool_use' or stop_blocked)"

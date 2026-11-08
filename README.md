@@ -15,7 +15,9 @@ bin/harness --var session=/state/sessions/<id>.jsonl   # resume one
 bin/harness --var approve=auto                         # run tools without asking
 bin/harness --var model=claude-sonnet-5-5
 bin/harness --var thinking_display=omitted            # hide the model's thinking (it still thinks)
+bin/harness --var compact_at=100000                    # compact the conversation sooner (default 160000 tokens)
 python3 tests/test_harness.py                          # end-to-end tests (pexpect, real relay, container)
+python3 tests/test_scripts.py                          # unit tests of the scripts (no model, no container)
 ../markov/bin/static/markov validate .                 # check the workflow without running it
 ```
 
@@ -30,12 +32,13 @@ one file per workflow:
 | `vars.yaml` | Settings, each overridable with `--var` (model, approval, limits, paths) |
 | `vars/prompts.yaml` | The identity line and the system prompt |
 | `vars/tools.yaml` | The tool definitions offered to the model |
-| `workflows/main.yaml` | Session setup: key, session file, memory snapshot, the shared request blocks; repeats `turn` |
-| `workflows/turn.yaml` | One user turn: prompt, record, repeat `agent_step`, memory extraction |
-| `workflows/agent_step.yaml` | One model call and the tools it asks for |
+| `workflows/main.yaml` | Session setup: key, session file, the instructions, memory, skill and agent snapshots, the shared request blocks; repeats `turn` |
+| `workflows/turn.yaml` | One user turn: prompt, UserPromptSubmit hooks, record, repeat `agent_step`, memory extraction; `/compact` |
+| `workflows/agent_step.yaml` | One model call (compacting first when the context is full), the gate, the tools it asks for, PostToolUse and Stop hooks |
+| `workflows/compact.yaml` | Compaction: summarize the conversation and replace it with the summary |
 | `workflows/extract/memories.yaml`, `extract/step.yaml` | The memory extraction pass: `extract.memories`, `extract.step` |
-| `workflows/tools/*.yaml` | One workflow per tool, named by its path: `tools.bash`, `tools.read_file`, …, `tools.unknown` |
-| `scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`, `skills.py`, `agents.py`, `input.py`) |
+| `workflows/tools/*.yaml` | One workflow per tool, named by its path: `tools.bash`, `tools.read_file`, …, `tools.denied`, `tools.unknown` |
+| `scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`, `skills.py`, `agents.py`, `input.py`, `instructions.py`, `compact.py`, `settings.py`, `hooks.py`) |
 | `skills/` | Skills that ship with the harness, one `<name>/SKILL.md` folder each (see [Skills](#skills)) |
 | `agents/` | Subagent types that ship with the harness: `general-purpose` and `Explore` (see [Subagents](#subagents)) |
 | `workflows/subagent_step.yaml`, `agent/run.yaml` | A subagent: one model call and its tools, and `agent.run`, which starts one, repeats that and collects its answer (for the tool and for `/agent`) |
@@ -74,7 +77,7 @@ each mount with `:z` for SELinux:
 | `../markov/bin/static/markov` | `/usr/local/bin/markov` | ro |
 | `meta.yaml`, `vars.yaml`, `vars/`, `rules.yaml`, `step_types.yaml`, `workflows/`, `scripts/`, `skills/`, `agents/` | `/harness` (the directory workflow) | ro |
 | `.state/relay-api-key` | `/run/secrets/relay-api-key` | ro |
-| `.state/container/` | `/state` (sessions, memory, personal skills and agents, `markov.log`, `markov-state.db`) | rw |
+| `.state/container/` | `/state` (sessions, memory, personal skills and agents, `CLAUDE.md`, `settings.json`, `markov.log`, `markov-state.db`) | rw |
 | `$HARNESS_WORKDIR` (default `$PWD`) | `/work`, the tools' cwd | rw |
 
 The container runs with `--userns=keep-id`, `--cap-drop=all`, `no-new-privileges`, a read-only root with a tmpfs `/tmp`,
@@ -90,17 +93,100 @@ project (`markov-harness`) and can be rotated or revoked from the relay admin AP
 
 | Tool | Approval | |
 |---|---|---|
-| `bash` | asks | Runs in `/work`; output streams to the terminal line by line (`live_output`), then `⎿ exit N` |
-| `write_file` | asks, except `.md` files in the memory dir | Create or replace a file |
-| `edit_file` | asks, after showing the diff, except `.md` files in the memory dir | Replace `old_string` with `new_string`; it must occur exactly once unless `replace_all`. `scripts/edit.py` plans the change, the diff is shown, and `apply` checks again before writing |
+| `bash` | asks, unless a rule allows it (see [Permissions](#permissions)) | Runs in `/work`; output streams to the terminal line by line (`live_output`), then `⎿ exit N` |
+| `write_file` | asks, except `.md` files in the memory dir and paths a rule allows | Create or replace a file |
+| `edit_file` | asks, after showing the diff, except `.md` files in the memory dir and paths a rule allows | Replace `old_string` with `new_string`; it must occur exactly once unless `replace_all`. `scripts/edit.py` plans the change, the diff is shown, and `apply` checks again before writing |
 | `skill` | never | Load a skill's instructions (see [Skills](#skills)) |
 | `agent` | never itself; the subagent's own `bash`/`write_file`/`edit_file` ask | Hand a task to a subagent (see [Subagents](#subagents)) |
 | `read_file`, `glob`, `grep` | never | Read-only; several in one reply run in parallel (`concurrency: 4`), each printing its call and result together so they don't interleave. `scripts/search.py` skips `.git`, `node_modules` and the like and stops at 200 results |
 
-Read-only tools in a reply run before the ones that change things; tool calls in one reply are meant to be
+Every call first goes through the gate (`hooks.py pre`): PreToolUse hooks and permission rules decide whether it
+runs, asks, or is denied (`tools.denied` answers it with the reason). Read-only tools in a reply run before the ones that change things; tool calls in one reply are meant to be
 independent. Tools stream their input (`eager_input_streaming`), shown as a `… tool input: N chars` line while
 the model writes it; `history.py assemble` checks the input is a JSON object, and one that isn't (cut off by
 `max_tokens`) gets an error result instead of running.
+
+## Instructions (CLAUDE.md)
+
+A copy of Claude Code's CLAUDE.md loading (`scripts/instructions.py`):
+
+- **At session start**, `instructions.py context` snapshots, in order: the user's file (`/state/CLAUDE.md`, host
+  `.state/container/CLAUDE.md`; `--var user_instructions=...` moves it), the work dir's `CLAUDE.md` and
+  `.claude/CLAUDE.md` (or `AGENTS.md` when it has neither), and its `CLAUDE.local.md`. `history.py messages` puts
+  them first in the first user message, as a `<system-reminder>` with Claude Code's `# claudeMd` preamble, each file
+  as `Contents of <path> (<kind>):`. Fixed for the session, like the memory index.
+- **Nested:** when `read_file` reads a file in a subdirectory, the `CLAUDE.md` (or `AGENTS.md`) and `CLAUDE.local.md`
+  of each directory between the work dir and the file are added after the tool result as a reminder, once per
+  session (listed in `<session>.nested`, under a lock, since reads run in parallel). This is Claude Code's
+  `nested_memory` attachment.
+- Subagents get the session's snapshot too, and their own nested files. Not (yet): `@path` imports, and the
+  instructions of the work dir's parents (only the work dir is mounted).
+
+## Compaction
+
+A copy of Claude Code's compaction (`workflows/compact.yaml`, `scripts/compact.py`):
+
+- **When:** before each main-loop model call, `compact.py check` compares the last call's context size (input, cache
+  and output tokens, saved to `<session>.usage`) with `compact_at` (160,000; `0` turns it off), so a long turn is
+  compacted between its tool rounds too. `/compact [instructions]` compacts at once.
+- **How:** one model call with the conversation and a summary prompt modelled on Claude Code's (an `<analysis>`,
+  then a `<summary>` with the requests, files and code, errors, every user message, pending tasks and the current
+  work). It sends the main loop's system blocks and tools, so it reads their prompt cache, and is told not to call tools.
+- **After:** the old session is copied to `<session>.compacted-<n>.jsonl`, and the session becomes one user
+  message: the summary, that file's path (the model can `read_file` it for details) and, when automatic, Claude
+  Code's instruction to carry on without recapping. The instruction, memory, skill and agent reminders are added
+  again as usual, and nested instruction files are sent again when next read.
+- Not (yet): keeping the most recent messages verbatim after the summary, and re-attaching recently read files.
+
+## Permissions
+
+Claude Code's permission rules, from settings files (`scripts/settings.py`), merged in order: the user's
+`/state/settings.json` (host `.state/container/settings.json`; `--var user_settings=...` moves it), then the work
+dir's `.claude/settings.json` and `.claude/settings.local.json`:
+
+```json
+{"permissions": {"allow": ["Bash(npm test)", "Bash(git diff *)", "Edit(src/**)"],
+                 "ask":   ["Bash(git push *)"],
+                 "deny":  ["Bash(rm *)", "Edit(//etc/**)"]}}
+```
+
+- **Rules:** a tool name with an optional specifier. `Bash(cmd)` is that exact command; `Bash(cmd *)` or
+  `Bash(cmd:*)` that command with or without more words. `Edit(glob)` covers `write_file` and `edit_file`
+  (`Write(...)` only `write_file`), with the glob relative to the work dir (`//` for an absolute path; `*` stays in a
+  directory, `**` crosses them). The harness's names work too (`bash(...)`, `edit_file(...)`).
+- **Order:** deny, then ask, then allow; ask rules prompt even with `approve=auto`. Read-only tools need no rule.
+- **Compound commands:** a command with `;`, `&`, `|`, `<`, `>`, a backtick, `$(` or a newline only matches an allow
+  rule written for exactly that command, so `Bash(git diff *)` can't pass `git diff; rm -rf x`. Deny and ask rules
+  also match each part. This is a convenience, not a sandbox: the container is the sandbox.
+- **`a` (always)** at an approval prompt (`[y/n/a]`) runs the call and saves an allow rule for exactly that command
+  or file to `.claude/settings.local.json`; later calls show `✻ allowed by <rule>` instead of asking.
+- Subagents' calls go through the same rules.
+
+## Hooks
+
+Claude Code's command hooks (`scripts/hooks.py`), configured in the same settings files:
+
+```json
+{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 .claude/check.py"}]}]}}
+```
+
+| Event | When | What it can do |
+|---|---|---|
+| `PreToolUse` | before each tool call (the gate) | exit 2, or `permissionDecision: deny`: deny it, the reason going to the model; `allow` or `ask`; `updatedInput` |
+| `PostToolUse` | after a reply's tool calls ran | exit 2, `decision: block` or `additionalContext`: a reminder to the model after the results |
+| `UserPromptSubmit` | before a prompt is sent | stdout or `additionalContext`: context after the prompt; exit 2 or `decision: block`: drop the prompt |
+| `Stop` | when the model ends its turn | exit 2 or `decision: block`: send it back to work with the reason (`stop_hook_active` is true on the next stop) |
+
+- A hook runs with `sh -c` in the work dir, in the container, with the event as JSON on stdin (`session_id`,
+  `transcript_path`, `cwd`, `hook_event_name`, `permission_mode` and the event's fields). Tool names and the
+  `file_path` input field are Claude Code's, so hooks written for Claude Code work. The matcher is a regular
+  expression over the tool name.
+- Other exit codes and timeouts (`timeout`, default 60 s) are shown as a dim note and don't block; `systemMessage`
+  is shown too. A denial shows the call and the reason.
+- Order of the gate: a hook's deny, a deny rule, a hook's ask, an ask rule, a hook's allow, an allow rule, then the
+  defaults (mutating tools ask unless `approve=auto` or a memory file).
+- Not (yet): `SessionStart`, `SubagentStop`, `PreCompact`, `Notification` and the other events, `continue: false`,
+  and hooks in the extraction pass.
 
 ## Memory
 
@@ -209,7 +295,7 @@ context (its own session file, system prompt and tools); only its final message 
 
 | Piece | Where |
 |---|---|
-| Loop | markov `repeat` (flat do-while loops): `main` repeats `turn` until `/exit`; `turn` repeats `agent_step` while the model asks for tools, up to `max_tool_rounds` (50) calls; the extraction pass repeats `extract.step` up to `extract_max_turns` (5) |
+| Loop | markov `repeat` (flat do-while loops): `main` repeats `turn` until `/exit`; `turn` repeats `agent_step` while the model asks for tools (or a Stop hook sends it back), up to `max_tool_rounds` (50) calls; the extraction pass repeats `extract.step` up to `extract_max_turns` (5) |
 | User input / tool approval | markov `prompt` step (needs a TTY) |
 | Conversation state | `/state/sessions/<run>.jsonl` (host: `.state/container/sessions/`), one message per line, appended with `write_file` |
 | Request shaping | `scripts/history.py` turns the JSONL into `messages`, merging same-role lines |

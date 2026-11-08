@@ -31,6 +31,25 @@ steps:
       append: true
       content: "{{ message | to_json }}\n"
 
+  # CLAUDE.md files of the directories between the work dir and the file, once per session
+  # (scripts/instructions.py nested): a reminder after the tool result.
+  - name: nested
+    type: script_exec
+    when: "read.exit_code == 0"
+    params:
+      interpreter: python3
+      path: instructions.py
+      args: [nested, "{{ session_file }}", "{{ block.input.path }}"]
+    register: nested
+
+  - name: record_nested
+    type: write_file
+    when: "read.exit_code == 0 and nested.stdout"
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ nested.stdout | trim }}\n"
+
   - name: show
     type: script_exec
     params:

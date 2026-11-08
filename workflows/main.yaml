@@ -20,6 +20,14 @@ steps:
       path: memory.py
       args: [context, "{{ memory_dir }}", "{{ session_path }}.context"]
 
+  # Snapshots the CLAUDE.md instructions for this session (see scripts/instructions.py).
+  - name: instructions_context
+    type: script_exec
+    params:
+      interpreter: python3
+      path: instructions.py
+      args: [context, "{{ session_path }}.instructions", "{{ user_instructions }}"]
+
   # Snapshots the skill listing for this session (see scripts/skills.py), like memory_context.
   - name: skills_context
     type: script_exec

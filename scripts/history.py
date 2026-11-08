@@ -11,7 +11,8 @@ listing of the skills) goes at the start of the first user message, in order, ea
 <system-reminder> tags, the way Claude Code delivers MEMORY.md and the skill listing.
 
 `assemble` reads a streaming http_request's output ({status_code, body: [{event, data}, ...]}), or a
-non-streaming one whose body is the message itself, and prints {content, stop_reason, usage, invalid}, or {error, status} when the call or the stream
+non-streaming one whose body is the message itself, and prints {content, stop_reason, usage, invalid,
+context_tokens}, or {error, status} when the call or the stream
 failed. `invalid` lists the ids of tool_use blocks whose streamed input was not a JSON object (with
 eager input streaming the API does not check it, and max_tokens can cut it off); their input is
 set to {} and the harness answers them with an error instead of running them.
@@ -26,15 +27,22 @@ def blocks(content):
     return list(content)
 
 
-def messages(path, *context_paths):
-    merged = []
+def read_lines(path):
+    """The session file's messages, one per line; [] when it doesn't exist yet."""
     try:
         with open(path, encoding="utf-8") as f:
-            lines = [line for line in f if line.strip()]
+            return [json.loads(line) for line in f if line.strip()]
     except FileNotFoundError:
-        lines = []
-    for line in lines:
-        msg = json.loads(line)
+        return []
+
+
+def messages(path, *context_paths):
+    return merge(read_lines(path), *context_paths)
+
+
+def merge(lines, *context_paths):
+    merged = []
+    for msg in lines:
         if merged and merged[-1]["role"] == msg["role"]:
             merged[-1]["content"] = blocks(merged[-1]["content"]) + blocks(msg["content"])
         else:
@@ -61,7 +69,7 @@ def assemble(response):
     status, body = response.get("status_code"), response.get("body")
     if status == 200 and isinstance(body, dict) and "content" in body:   # not streamed: already one message
         return {"content": body["content"], "stop_reason": body.get("stop_reason"),
-                "usage": body.get("usage", {}), "invalid": []}
+                "usage": body.get("usage", {}), "invalid": [], "context_tokens": context_tokens(body.get("usage", {}))}
     if status != 200 or not isinstance(body, list):
         return {"error": body, "status": status}
     message, blocks, partial_json, invalid = {}, {}, {}, []
@@ -108,12 +116,20 @@ def assemble(response):
         blocks[i]["input"] = {}
     if "stop_reason" not in message:
         return {"error": {"error": {"type": "incomplete_stream", "message": "stream ended before message_delta"}}, "status": status}
+    usage = message.get("usage", {})
     return {
         "content": [blocks[i] for i in sorted(blocks)],
         "stop_reason": message.get("stop_reason"),
-        "usage": message.get("usage", {}),
+        "usage": usage,
         "invalid": invalid,
+        "context_tokens": context_tokens(usage),
     }
+
+
+def context_tokens(usage):
+    """How big the context was after this call: what compact.py check compares with compact_at."""
+    return sum(int(usage.get(k) or 0) for k in
+               ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"))
 
 
 def main(argv):

@@ -1,0 +1,85 @@
+# Replaces the conversation with a summary of it (scripts/compact.py): automatically from agent_step
+# when the context reaches compact_at, or when the user types /compact [instructions]. The summary
+# call sends the main loop's system blocks and tools, so it reads their prompt cache.
+name: compact
+vars:
+  session_file: null
+  relay_api_key: null
+  request_base: null
+  manual: false
+  instructions: ""
+steps:
+  - name: announce
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [note, "Compacting conversation…"]
+
+  - name: build
+    type: script_exec
+    params:
+      interpreter: python3
+      path: compact.py
+      args: [request, "{{ session_file }}", "{{ session_file }}.instructions", "{{ session_file }}.context", "{{ session_file }}.skills", "{{ session_file }}.agents"]
+      stdin:
+        instructions: "{{ instructions }}"
+    register: build
+
+  - name: parse_build
+    type: set_fact
+    vars:
+      prepared: "{{ build.stdout | from_json }}"
+
+  - name: call_model
+    type: http_request
+    when: "prepared.ok"
+    params:
+      method: POST
+      url: "{{ relay_base_url }}/v1/messages"
+      headers:
+        x-api-key: "{{ relay_api_key }}"
+        anthropic-version: "2023-06-01"
+      ignore_status: true
+      body:
+        model: "{{ model }}"
+        max_tokens: "{{ compact_max_tokens }}"
+        cache_control: {type: ephemeral}
+        thinking: "{{ request_base.thinking }}"
+        system: "{{ request_base.system }}"
+        tools: "{{ tools }}"
+        messages: "{{ prepared.messages }}"
+    register: response
+
+  - name: assemble
+    type: script_exec
+    when: "prepared.ok"
+    params:
+      interpreter: python3
+      path: history.py
+      args: [assemble]
+      stdin: "{{ response }}"
+    register: assembled
+
+  - name: apply
+    type: script_exec
+    when: "prepared.ok"
+    params:
+      interpreter: python3
+      path: compact.py
+      args: [apply, "{{ session_file }}", "{% if manual %}true{% else %}false{% endif %}"]
+      stdin: "{{ assembled.stdout }}"
+    register: apply
+
+  # Rendered as JSON text, which set_fact reads back as a map.
+  - name: outcome
+    type: set_fact
+    vars:
+      result: "{% if prepared.ok %}{{ apply.stdout }}{% else %}{{ build.stdout }}{% endif %}"
+
+  - name: show
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [note, "{% if result.ok %}Conversation compacted (summary: {{ result.chars }} chars; the full transcript is in {{ result.archive }}){% else %}Compaction skipped: {{ result.error }}{% endif %}"]

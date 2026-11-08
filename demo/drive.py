@@ -18,7 +18,7 @@ import pexpect
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPT = ">: "
-APPROVAL = r"(run|write|apply) it\? \[y/n\]"
+APPROVAL = r"(run|write|apply) it\? \(a: always\) \[y/n/a\]"
 HELLO = '''def greet(name):
     return f"Hello, {name}!"
 

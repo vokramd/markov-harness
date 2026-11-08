@@ -13,6 +13,7 @@ markov captures a step's stdout/stderr, so this writes to /dev/tty (falling back
     show.py exit <code>      (after a command whose output streamed live)
     show.py diff             < edit.py diff JSON
     show.py note <text>      (a dim line: something the harness did on its own)
+    show.py notes            < JSON list of such lines (hook messages and errors; nothing if empty)
     show.py skill <name>     < skills.py load message (the skill tool: loaded, or why not)
     show.py agent <type> <description>   (a subagent starts)
     show.py answer           < text (a subagent's answer to /agent, which no model relays)
@@ -27,6 +28,9 @@ import sys
 
 DIM, BOLD, RED, GREEN, CYAN, RESET = "\033[2m", "\033[1m", "\033[31m", "\033[32m", "\033[36m", "\033[0m"
 MAX_DIFF_LINES = 40
+# Tool names as Claude Code shows them, for lines that get the harness's name (a denied call).
+DISPLAY = {"bash": "Bash", "read_file": "Read", "write_file": "Write", "edit_file": "Edit", "glob": "Glob",
+           "grep": "Grep", "skill": "Skill", "agent": "Agent"}
 # bin/harness's memory dir, /state/projects/<work dir with every non-alphanumeric as ->/memory: the
 # key is the whole host path, so a tool line naming a memory file would mostly be the key.
 MEMORY_DIR = re.compile(r"/state/projects/[^/\s]+/memory(?=/|\s|$)")
@@ -85,7 +89,7 @@ def main(argv):
     elif cmd in ("result", "call"):
         msg = read_json()
         if cmd == "call":
-            out.write(f"\n{GREEN}⏺{RESET} {BOLD}{argv[2]}{RESET}({short(argv[3]) if len(argv) > 3 else ''})\n")
+            out.write(f"\n{GREEN}⏺{RESET} {BOLD}{DISPLAY.get(argv[2], argv[2])}{RESET}({short(argv[3]) if len(argv) > 3 else ''})\n")
         for block in msg.get("content", []):
             text = block.get("content", "")
             color = RED if block.get("is_error") else DIM
@@ -124,6 +128,10 @@ def main(argv):
             out.write(f"{DIM}  ⎿ Done ({uses} tool use{'' if uses == '1' else 's'} · {argv[3]} model calls){RESET}\n")
     elif cmd == "note":
         out.write(f"{DIM}  ✻ {argv[2]}{RESET}\n")
+    elif cmd == "notes":
+        notes = read_json()
+        for note in notes if isinstance(notes, list) else []:
+            out.write(f"{DIM}  ✻ {note}{RESET}\n")
     elif cmd == "memory":
         names = sorted({os.path.basename(p) for p in read_json().get("written", [])})
         if names:

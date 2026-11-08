@@ -7,13 +7,14 @@ vars:
   relay_api_key: null
   request_base: null
   agent: null          # agents.py start: {system, tools, allowed, model}
+  instructions_file: ""   # the main session's CLAUDE.md snapshot (instructions.py context)
 steps:
   - name: build
     type: script_exec
     params:
       interpreter: python3
       path: history.py
-      args: [messages, "{{ sub_session }}"]
+      args: [messages, "{{ sub_session }}", "{{ instructions_file }}"]
     register: history
 
   - name: call_model
@@ -83,36 +84,114 @@ steps:
       append: true
       content: "{{ message | to_json }}\n"
 
+  # Permission rules and PreToolUse hooks apply to a subagent's calls too (scripts/hooks.py pre).
+  - name: gate
+    type: script_exec
+    when: "ok"
+    params:
+      interpreter: python3
+      path: hooks.py
+      args: [pre, "{{ sub_session }}", "{{ user_settings }}"]
+      stdin:
+        reply: "{{ reply }}"
+        approve: "{{ approve }}"
+        memory_dir: "{{ memory_dir }}"
+        mutating_tools: "{{ mutating_tools }}"
+    register: gate
+
+  - name: parse_gate
+    type: set_fact
+    when: "ok"
+    vars:
+      gated: "{{ gate.stdout | from_json }}"
+
+  - name: show_gate_notes
+    type: script_exec
+    when: "ok and gated.notes | length > 0"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [notes]
+      stdin: "{{ gated.notes }}"
+
   - name: run_readonly
     when: "ok"
-    for_each: reply.content
-    as: block
-    for_each_when: "block.type == 'tool_use' and block.name in readonly_tools and block.name in agent.allowed and not (block.id in reply.invalid)"
+    for_each: gated.calls
+    as: call
+    for_each_when: "call.decision != 'deny' and call.block.name in readonly_tools and call.block.name in agent.allowed and not (call.block.id in reply.invalid)"
     concurrency: 4
-    workflow: "tools.{{ block.name }}"
+    workflow: "tools.{{ call.block.name }}"
     vars:
-      block: "{{ block }}"
+      block: "{{ call.block }}"
       session_file: "{{ sub_session }}"
 
   - name: run_mutating
     when: "ok"
-    for_each: reply.content
-    as: block
-    for_each_when: "block.type == 'tool_use' and block.name in mutating_tools and block.name in agent.allowed and not (block.id in reply.invalid)"
+    for_each: gated.calls
+    as: call
+    for_each_when: "call.decision != 'deny' and call.block.name in mutating_tools and call.block.name in agent.allowed and not (call.block.id in reply.invalid)"
     concurrency: 1
-    workflow: "tools.{{ block.name }}"
+    workflow: "tools.{{ call.block.name }}"
     vars:
-      block: "{{ block }}"
+      block: "{{ call.block }}"
       session_file: "{{ sub_session }}"
+      decision: "{{ call.decision }}"
+      reason: "{{ call.reason }}"
+      suggest: "{{ call.suggest }}"
+
+  - name: denied_tools
+    when: "ok"
+    for_each: gated.calls
+    as: call
+    for_each_when: "call.decision == 'deny'"
+    workflow: tools.denied
+    vars:
+      block: "{{ call.block }}"
+      session_file: "{{ sub_session }}"
+      reason: "{{ call.reason }}"
 
   # Anything it may not use, the agent tool included: answered with an error, not run.
   - name: unknown_tools
     when: "ok"
-    for_each: reply.content
-    as: block
-    for_each_when: "block.type == 'tool_use' and (block.id in reply.invalid or not (block.name in agent.allowed) or not (block.name in readonly_tools or block.name in mutating_tools))"
+    for_each: gated.calls
+    as: call
+    for_each_when: "call.decision != 'deny' and (call.block.id in reply.invalid or not (call.block.name in agent.allowed) or not (call.block.name in readonly_tools or call.block.name in mutating_tools))"
     workflow: tools.unknown
     vars:
-      block: "{{ block }}"
+      block: "{{ call.block }}"
       session_file: "{{ sub_session }}"
-      invalid: "{{ block.id in reply.invalid }}"
+      invalid: "{{ call.block.id in reply.invalid }}"
+
+  - name: post_hooks
+    type: script_exec
+    when: "ok and gated.post"
+    params:
+      interpreter: python3
+      path: hooks.py
+      args: [post, "{{ sub_session }}", "{{ user_settings }}"]
+      stdin:
+        calls: "{{ gated.calls }}"
+    register: post_hooks
+
+  - name: parse_post
+    type: set_fact
+    when: "ok and gated.post"
+    vars:
+      posted: "{{ post_hooks.stdout | from_json }}"
+
+  - name: record_post
+    type: write_file
+    when: "ok and gated.post and posted.message"
+    params:
+      path: "{{ sub_session }}"
+      append: true
+      content: "{{ posted.message | to_json }}\n"
+
+  - name: show_post_notes
+    type: script_exec
+    when: "ok and gated.post and posted.notes | length > 0"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [notes]
+      stdin: "{{ posted.notes }}"

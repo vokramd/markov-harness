@@ -1,0 +1,33 @@
+# A tool call that hooks.py pre denied (a deny rule, or a PreToolUse hook): never run, answered with
+# the reason as an error.
+name: tools.denied
+vars:
+  block: null
+  session_file: null
+  reason: null
+steps:
+  - name: result
+    type: set_fact
+    vars:
+      message:
+        role: user
+        content:
+          - type: tool_result
+            tool_use_id: "{{ block.id }}"
+            is_error: true
+            content: "{{ reason }}"
+
+  - name: record
+    type: write_file
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ message | to_json }}\n"
+
+  - name: show
+    type: script_exec
+    params:
+      interpreter: python3
+      path: show.py
+      args: [call, "{{ block.name }}", "{% if block.input.command %}{{ block.input.command }}{% elif block.input.path %}{{ block.input.path }}{% endif %}"]
+      stdin: "{{ message }}"

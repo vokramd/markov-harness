@@ -40,6 +40,7 @@ steps:
       relay_api_key: "{{ relay_api_key }}"
       request_base: "{{ request_base }}"
       agent: "{{ started }}"
+      instructions_file: "{{ session_file }}.instructions"
     repeat:
       until: "not ok or reply.stop_reason != 'tool_use'"
       max: "{{ max_tool_rounds }}"

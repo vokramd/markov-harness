@@ -23,6 +23,7 @@ steps:
     when: "decision.run"
     vars:
       fork_file: "{{ session_file }}.extract.jsonl"
+      instructions_file: "{{ session_file }}.instructions"
       context_file: "{{ session_file }}.context"
       skills_file: "{{ session_file }}.skills"
       agents_file: "{{ session_file }}.agents"

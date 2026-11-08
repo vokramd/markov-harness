@@ -140,15 +140,32 @@ def read_session(path):
         return [json.loads(line) for line in f if line.strip()]
 
 
+def user_text(m):
+    """What the user typed, if m is a message they wrote: a string, or text blocks (a prompt with hook
+    context or an agent reminder after it). None for tool results and for messages the harness adds
+    (nested instructions, hook feedback), which start with a reminder or a tool_result."""
+    if m["role"] != "user":
+        return None
+    if isinstance(m["content"], str):
+        return m["content"]
+    blocks = m["content"]
+    if not blocks or any(b.get("type") != "text" for b in blocks):
+        return None
+    first = blocks[0].get("text", "")
+    if first.startswith("<system-reminder>") or first.startswith("Stop hook feedback:"):
+        return None
+    return "\n".join(b.get("text", "") for b in blocks if not b.get("text", "").startswith("<system-reminder>"))
+
+
 def fork(session, memory_dir, fork_path):
     lines = read_session(session)
     if not lines or lines[-1]["role"] != "assistant":
         return {"run": False, "reason": "the turn did not finish"}
-    starts = [i for i, m in enumerate(lines) if m["role"] == "user" and isinstance(m["content"], str)]
+    starts = [i for i, m in enumerate(lines) if user_text(m) is not None]
     if not starts:
         return {"run": False, "reason": "no user message"}
     turn = lines[starts[-1]:]
-    if len(turn[0]["content"].split()) < MIN_WORDS:
+    if len(user_text(turn[0]).split()) < MIN_WORDS:
         return {"run": False, "reason": f"user message under {MIN_WORDS} words"}
     for m in turn:
         if m["role"] == "assistant" and isinstance(m["content"], list):

@@ -2,6 +2,9 @@ name: tools.bash
 vars:
   block: null
   session_file: null
+  decision: ask     # from hooks.py pre: allow runs it, ask prompts first (deny never gets here)
+  reason: ""        # why it was allowed without asking (a rule or a hook), shown
+  suggest: ""       # the allow rule an `a` (always) answer saves
 steps:
   - name: announce
     type: script_exec
@@ -10,12 +13,20 @@ steps:
       path: show.py
       args: [tool, Bash, "{{ block.input.command }}"]
 
+  - name: allowed_note
+    type: script_exec
+    when: "decision == 'allow' and reason"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [note, "{{ reason }}"]
+
   - name: approval
     type: prompt
-    when: "approve == 'ask'"
+    when: "decision == 'ask'"
     params:
-      message: "  run it?"
-      choices: ["y", "n"]
+      message: "  run it? (a: always)"
+      choices: ["y", "n", "a"]
       default: "y"
       case_insensitive: true
     register: approval
@@ -23,7 +34,25 @@ steps:
   - name: decide
     type: set_fact
     vars:
-      approved: "approve != 'ask' or approval.value == 'y'"
+      approved: "decision == 'allow' or approval.value == 'y' or approval.value == 'a'"
+
+  # `a`: save the rule so the same call isn't asked again (scripts/settings.py add).
+  - name: always
+    type: script_exec
+    when: "decision == 'ask' and approval.value == 'a'"
+    params:
+      interpreter: python3
+      path: settings.py
+      args: [add, "{{ suggest }}"]
+    register: always
+
+  - name: show_always
+    type: script_exec
+    when: "decision == 'ask' and approval.value == 'a'"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [note, "{{ always.stdout }}"]
 
   - name: run
     type: script_exec

@@ -1,6 +1,9 @@
 """What the user typed, turned into what the harness does with it.
 
-    python3 input.py < {value, skill_dirs, agent_dirs}   -> {message, skill, mentions, command, error}
+    python3 input.py < {value, skill_dirs, agent_dirs}   -> {message, skill, mentions, command, compact, error}
+
+- `/compact [instructions]` compacts the conversation now (compact workflow): `compact` is
+  {instructions}, and `message` is null.
 
 - `/agent <type> <task>` is a command the workflow runs itself, with no model call: `command` is
   {subagent_type, prompt}, and `message` is null (tools.agent's loop runs the subagent; turn records it).
@@ -17,6 +20,7 @@ import sys
 import agents
 import skills
 
+COMPACT_COMMAND = re.compile(r"^/compact(?:\s+(.*))?$", re.S)
 AGENT_COMMAND = re.compile(r"^/agent(?:\s+(\S+))?(?:\s+(.*))?$", re.S)
 MENTION = re.compile(r"(?<![\w@])@agent-([A-Za-z0-9][A-Za-z0-9_.-]*[A-Za-z0-9]|[A-Za-z0-9])")
 REMINDER = ('<system-reminder>The user has expressed a desire to invoke the agent "{name}". Please invoke the '
@@ -24,8 +28,11 @@ REMINDER = ('<system-reminder>The user has expressed a desire to invoke the agen
 
 
 def expand(value, skill_dirs, agent_dirs):
-    out = {"message": None, "skill": None, "mentions": [], "command": None, "error": None}
+    out = {"message": None, "skill": None, "mentions": [], "command": None, "compact": None, "error": None}
     text = value.strip()
+    m = COMPACT_COMMAND.match(text)
+    if m:
+        return {**out, "compact": {"instructions": (m.group(1) or "").strip()}}
     m = AGENT_COMMAND.match(text)
     if m:
         kind, task = m.group(1), (m.group(2) or "").strip()

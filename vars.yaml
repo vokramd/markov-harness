@@ -7,6 +7,10 @@ skills_dir: .state/skills              # personal skills (<name>/SKILL.md), afte
 project_skills_dir: .claude/skills     # the work dir's skills, searched last; an earlier skill of the same name wins
 agents_dir: .state/agents              # personal agent types (<name>.md), after the repo's agents/; bin/harness passes /state/agents
 project_agents_dir: .claude/agents     # the work dir's agent types, searched last
+user_instructions: .state/CLAUDE.md     # the user's instructions for every project; bin/harness passes /state/CLAUDE.md
+user_settings: .state/settings.json    # permission rules and hooks, before the work dir's .claude/settings{,.local}.json; bin/harness passes /state/settings.json
+compact_at: 160000                     # compact the conversation once a model call's context reaches this many tokens; 0 never
+compact_max_tokens: 12000              # max_tokens of the summary call
 max_turns: 100000                      # user turns per session
 max_tool_rounds: 50                    # model calls per user turn while it keeps asking for tools
 extract_memories: true                 # run the extraction pass after each turn

@@ -2,6 +2,9 @@ name: tools.write_file
 vars:
   block: null
   session_file: null
+  decision: ask     # from hooks.py pre: allow runs it, ask prompts first (deny never gets here)
+  reason: ""        # why it was allowed without asking (a rule or a hook), shown
+  suggest: ""       # the allow rule an `a` (always) answer saves
 steps:
   - name: announce
     type: script_exec
@@ -10,25 +13,20 @@ steps:
       path: show.py
       args: [tool, Write, "{{ block.input.path }}"]
 
-  - name: memory_check
+  - name: allowed_note
     type: script_exec
+    when: "decision == 'allow' and reason"
     params:
       interpreter: python3
-      path: memory.py
-      args: [owns, "{{ memory_dir }}", "{{ block.input.path }}"]
-    register: memory_check
-
-  - name: in_memory
-    type: set_fact
-    vars:
-      in_memory: "memory_check.stdout == 'true'"
+      path: show.py
+      args: [note, "{{ reason }}"]
 
   - name: approval
     type: prompt
-    when: "approve == 'ask' and not in_memory"
+    when: "decision == 'ask'"
     params:
-      message: "  write it?"
-      choices: ["y", "n"]
+      message: "  write it? (a: always)"
+      choices: ["y", "n", "a"]
       default: "y"
       case_insensitive: true
     register: approval
@@ -36,7 +34,25 @@ steps:
   - name: decide
     type: set_fact
     vars:
-      approved: "approve != 'ask' or in_memory or approval.value == 'y'"
+      approved: "decision == 'allow' or approval.value == 'y' or approval.value == 'a'"
+
+  # `a`: save the rule so the same call isn't asked again (scripts/settings.py add).
+  - name: always
+    type: script_exec
+    when: "decision == 'ask' and approval.value == 'a'"
+    params:
+      interpreter: python3
+      path: settings.py
+      args: [add, "{{ suggest }}"]
+    register: always
+
+  - name: show_always
+    type: script_exec
+    when: "decision == 'ask' and approval.value == 'a'"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [note, "{{ always.stdout }}"]
 
   - name: write
     type: write_file

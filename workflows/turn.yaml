@@ -40,9 +40,56 @@ steps:
     type: set_fact
     when: "not quit"
     vars:
-      send: "not expanded.error and not expanded.command"
+      send: "not expanded.error and not expanded.command and not expanded.compact"
       direct: "expanded.command and not expanded.error"
-      message: "{{ expanded.message }}"
+      compact_now: "expanded.compact and not expanded.error"
+      go: false
+
+  # UserPromptSubmit hooks (scripts/hooks.py prompt): one may add context to the message, or block it.
+  - name: prompt_hooks
+    type: script_exec
+    when: "not quit and send"
+    params:
+      interpreter: python3
+      path: hooks.py
+      args: [prompt, "{{ session_file }}", "{{ user_settings }}"]
+      stdin:
+        message: "{{ expanded.message }}"
+        prompt: "{{ user_input.value }}"
+    register: prompt_hooks
+
+  - name: parse_prompt_hooks
+    type: set_fact
+    when: "not quit and send"
+    vars:
+      hooked: "{{ prompt_hooks.stdout | from_json }}"
+
+  - name: check_go
+    type: set_fact
+    when: "not quit and send"
+    vars:
+      go: "not hooked.blocked"
+      message: "{{ hooked.message }}"
+
+  - name: show_prompt_hooks
+    type: script_exec
+    when: "not quit and send and hooked.notes | length > 0"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [notes]
+      stdin: "{{ hooked.notes }}"
+
+  # /compact [instructions]: summarize the conversation now (no turn follows).
+  - name: compact
+    workflow: compact
+    when: "not quit and compact_now"
+    vars:
+      session_file: "{{ session_file }}"
+      relay_api_key: "{{ relay_api_key }}"
+      request_base: "{{ request_base }}"
+      manual: true
+      instructions: "{{ expanded.compact.instructions }}"
 
   - name: show_expand
     type: script_exec
@@ -107,7 +154,7 @@ steps:
 
   - name: record_user
     type: write_file
-    when: "not quit and send"
+    when: "not quit and go"
     params:
       path: "{{ session_file }}"
       append: true
@@ -115,20 +162,20 @@ steps:
 
   - name: agent
     workflow: agent_step
-    when: "not quit and send"
+    when: "not quit and go"
     register: agent
     vars:
       session_file: "{{ session_file }}"
       relay_api_key: "{{ relay_api_key }}"
       request_base: "{{ request_base }}"
     repeat:
-      until: "not ok or reply.stop_reason != 'tool_use'"
+      until: "not keep_going"
       max: "{{ max_tool_rounds }}"
       on_max: stop
 
   - name: tool_limit
     type: script_exec
-    when: "not quit and send and agent.stopped_by == 'max'"
+    when: "not quit and go and agent.stopped_by == 'max'"
     params:
       interpreter: python3
       path: show.py
@@ -136,7 +183,7 @@ steps:
 
   - name: extract
     workflow: extract.memories
-    when: "not quit and send and extract_memories"
+    when: "not quit and go and extract_memories"
     vars:
       session_file: "{{ session_file }}"
       relay_api_key: "{{ relay_api_key }}"

@@ -24,6 +24,7 @@ PROMPT = ">: "
 TIMEOUT = 120
 MODEL = os.environ.get("MODEL", "claude-haiku-5-5")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+APPROVAL = r"(run|write|apply) it\? \(a: always\) \[y/n/a\]"
 
 
 class Session:
@@ -44,12 +45,15 @@ class Session:
         self.path = re.search(r"session=(\S+)", banner).group(1)
 
     def wait(self, pattern):
-        """Wait for pattern; fail fast if the harness reports an API error first."""
-        i = self.child.expect([pattern, r"API error[^\r\n]*"])
+        """Wait for pattern; fail fast if the harness reports an API error, or asks for an approval
+        the test didn't expect (it would otherwise wait out the timeout)."""
+        i = self.child.expect([pattern, r"API error[^\r\n]*", APPROVAL])
         seen = ANSI.sub("", self.child.before + self.child.after)
         self.transcript += seen
         if i == 1:
             raise AssertionError(f"harness reported: {ANSI.sub('', self.child.after)}")
+        if i == 2:
+            raise AssertionError(f"unexpected approval prompt: {seen[-400:]}")
         return seen
 
     def say(self, text):
@@ -95,7 +99,7 @@ def test_two_turns_share_context():
 
 def test_bash_tool_approved():
     s = Session()
-    s.say_until("Use the bash tool to run: echo markov-$((6*7)) . Then tell me the output.", r"run it\? \[y/n\]")
+    s.say_until("Use the bash tool to run: echo markov-$((6*7)) . Then tell me the output.", APPROVAL)
     out = s.answer("y")
     assert "markov-42" in out, out
     s.exit()
@@ -105,7 +109,7 @@ def test_bash_tool_approved():
 
 def test_bash_tool_denied():
     s = Session()
-    s.say_until("Use the bash tool to run: touch should-not-exist . Do not retry if it is declined.", r"run it\? \[y/n\]")
+    s.say_until("Use the bash tool to run: touch should-not-exist . Do not retry if it is declined.", APPROVAL)
     s.answer("n")
     s.exit()
     results = tool_results(s.messages())
@@ -190,7 +194,7 @@ def test_edit_file_shows_diff_and_applies():
         f.write("def greet():\n    return 'hello'\n\n\nprint(greet())\n")
     s = Session()
     out = s.say_until(f"Use edit_file on {name} to change the string 'hello' to 'goodbye'. Do not read it first; "
-                      "the line is exactly:     return 'hello'", r"apply it\? \[y/n\]")
+                      "the line is exactly:     return 'hello'", APPROVAL)
     assert "-    return 'hello'" in out and "+    return 'goodbye'" in out, out   # the diff, before approving
     s.answer("y")
     s.exit()
@@ -280,7 +284,7 @@ def test_memory_index_loaded_and_writes_need_no_approval():
     assert host in out, out
     s.child.sendline(f"Remember for future sessions: my preferred shell is {shell}. Save it to memory, "
                      "then reply with only: saved")
-    i = s.child.expect([PROMPT, r"(run|write|apply) it\? \[y/n\]"])
+    i = s.child.expect([PROMPT, APPROVAL])
     s.transcript += ANSI.sub("", s.child.before + s.child.after)
     assert i == 0, s.transcript[-800:]
     s.exit()
@@ -374,7 +378,7 @@ def test_explore_agent_searches_in_its_own_context():
     work, word, _ = agent_workdir()
     s = Session(workdir=work)
     out = s.say(f"Use the Explore agent to find which file under src/ contains the text '{word}'. "
-                "Reply with just the file's path.")
+                "Don't check its answer yourself; reply with just the file's path.")
     s.exit()
     assert "Explore(" in out and "Done (" in out, out
     assert "rates.txt" in out.split("Done (")[-1], out
@@ -496,6 +500,134 @@ def test_memory_extracted_after_turn():
     assert any(editor in t and "metadata:" in t for t in texts), texts
     roles = [m["role"] for m in s.messages()]
     assert roles == ["user", "assistant"], roles   # the pass writes to its own fork file, not the session
+
+
+def fresh_workdir(name):
+    """A work dir of this test's own, with its .claude settings and instruction files reset."""
+    work = os.path.join(HERE, ".state", name)
+    os.makedirs(os.path.join(work, ".claude"), exist_ok=True)
+    for rel in (".claude/settings.json", ".claude/settings.local.json"):
+        with open(os.path.join(work, rel), "w", encoding="utf-8") as f:
+            f.write("{}\n")
+    return work
+
+
+def reminders(messages):
+    return [b["text"] for m in messages if m["role"] == "user" and isinstance(m["content"], list)
+            for b in m["content"] if b.get("type") == "text" and b["text"].startswith("<system-reminder>")]
+
+
+def test_claude_md_and_nested_instructions():
+    work = fresh_workdir("work-instructions")
+    codename, team, colour = (f"{w}-{uuid.uuid4().hex[:6]}" for w in ("nebula", "otter", "cerulean"))
+    files = {"CLAUDE.md": f"The project codename is {codename}.\n",
+             "sub/deep/CLAUDE.md": f"Files in this folder belong to team {team}.\n",
+             "sub/deep/notes.txt": "hello\n"}
+    for rel, text in files.items():
+        os.makedirs(os.path.dirname(os.path.join(work, rel)), exist_ok=True)
+        with open(os.path.join(work, rel), "w", encoding="utf-8") as f:
+            f.write(text)
+    with open(os.path.join(STATE, "test-user-claude.md"), "w", encoding="utf-8") as f:
+        f.write(f"The user's favourite colour is {colour}.\n")
+    s = Session("--var", "user_instructions=/state/test-user-claude.md", workdir=work)
+    out = s.say("According to your instructions, what is the project codename and my favourite colour? "
+                "Reply with just the two words.")
+    assert codename in out and colour in out, out
+    assert team not in out, out                                      # the nested file isn't loaded yet
+    out = s.say("Use read_file on sub/deep/notes.txt, then tell me which team that folder belongs to, "
+                "per any instructions you got. Reply with just the team.")
+    assert team in out.split("Read(")[-1], out
+    s.say("Use read_file on sub/deep/notes.txt once more, then reply with only: ok")
+    s.exit()
+    nested = [r for r in reminders(s.messages()) if team in r]
+    assert len(nested) == 1 and "/work/sub/deep/CLAUDE.md" in nested[0], nested   # once per session
+    with open(host_path(s.path) + ".instructions", encoding="utf-8") as f:
+        snapshot = f.read()
+    assert snapshot.index(colour) < snapshot.index(codename), snapshot
+
+
+def test_always_allow_saves_a_rule():
+    work = fresh_workdir("work-perms")
+    command = f"echo perm-{uuid.uuid4().hex[:6]}"
+    s = Session(workdir=work)
+    s.say_until(f"Use the bash tool to run exactly: {command} . Then reply with only: done", APPROVAL)
+    out = s.answer("a")
+    assert f"saved Bash({command})" in out, out
+    with open(os.path.join(work, ".claude", "settings.local.json"), encoding="utf-8") as f:
+        assert json.load(f)["permissions"]["allow"] == [f"Bash({command})"]
+    out = s.say(f"Run exactly the same command with the bash tool again, then reply with only: done")   # no prompt
+    assert f"allowed by Bash({command})" in out, out
+    s.exit()
+    runs = [r for r in tool_results(s.messages()) if command.split()[1] in r["content"]]
+    assert len(runs) == 2 and not any(r.get("is_error") for r in runs), runs
+
+
+def test_permission_rules_and_hooks():
+    work = fresh_workdir("work-hooks")
+    magic, post, stop = (f"{w}-{uuid.uuid4().hex[:6]}" for w in ("xyzzy", "postmark", "finale"))
+    hook = f"""import json, sys
+data = json.load(sys.stdin)
+event = data["hook_event_name"]
+if event == "UserPromptSubmit":
+    print("The magic word is {magic}.")
+elif event == "PreToolUse" and "forbidden" in data["tool_input"].get("command", ""):
+    print("commands with forbidden in them are not allowed", file=sys.stderr)
+    sys.exit(2)
+elif event == "PostToolUse":
+    print(json.dumps({{"hookSpecificOutput": {{"hookEventName": "PostToolUse", "additionalContext": "{post}"}}}}))
+elif event == "Stop" and not data["stop_hook_active"]:
+    print("Before you finish, say the word {stop}.", file=sys.stderr)
+    sys.exit(2)
+"""
+    with open(os.path.join(work, ".claude", "hook.py"), "w", encoding="utf-8") as f:
+        f.write(hook)
+    each = [{"hooks": [{"type": "command", "command": "python3 .claude/hook.py"}]}]
+    with open(os.path.join(work, ".claude", "settings.json"), "w", encoding="utf-8") as f:
+        json.dump({"permissions": {"deny": ["Bash(touch *)"]},
+                   "hooks": {e: each for e in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")}}, f)
+    if os.path.exists(os.path.join(work, "made-by-test")):
+        os.remove(os.path.join(work, "made-by-test"))
+    s = Session("--var", "approve=auto", workdir=work)
+    out = s.say("What is the magic word? Reply with just the word.")
+    assert magic in out, out                                          # UserPromptSubmit context
+    assert "Stop hook sent the agent back" in out and stop in out.split("Stop hook sent the agent back")[-1], out
+    s.say("Use the bash tool to run exactly: echo forbidden-thing . Do not retry; reply with only: done")
+    s.say("Use the bash tool to run exactly: touch made-by-test . Do not retry; reply with only: done")
+    s.say("Use the bash tool to run exactly: echo hello-post . Then reply with only: done")
+    s.exit()
+    results = tool_results(s.messages())
+    assert any(r.get("is_error") and "PreToolUse:Bash hook denied" in r["content"] and "forbidden in them" in r["content"]
+               for r in results), results
+    assert any(r.get("is_error") and "denied by the rule Bash(touch *)" in r["content"] for r in results), results
+    assert not os.path.exists(os.path.join(work, "made-by-test"))
+    assert any(f"PostToolUse:Bash hook additional context: {post}" in r for r in reminders(s.messages()))
+
+
+def test_compact_command():
+    code = f"vault-{uuid.uuid4().hex[:6]}"
+    s = Session()
+    s.say(f"The vault code is {code}. Reply only with: ok")
+    out = s.say("/compact")
+    assert "Conversation compacted" in out, out
+    msgs = s.messages()
+    assert len(msgs) == 1 and code in msgs[0]["content"][0]["text"], msgs
+    assert os.path.exists(host_path(s.path) + ".compacted-1.jsonl")
+    out = s.say("What is the vault code? Reply with just the code.")
+    assert code in out, out
+    s.exit()
+
+
+def test_auto_compaction():
+    code = f"vault-{uuid.uuid4().hex[:6]}"
+    s = Session("--var", "compact_at=1")   # every call after the first compacts before it runs
+    s.say(f"The vault code is {code}. Reply only with: ok")
+    out = s.say("What is the vault code? Reply with just the code.")
+    assert "Compacting conversation" in out and "Conversation compacted" in out, out
+    assert code in out.split("Conversation compacted")[-1], out
+    s.exit()
+    first = s.messages()[0]["content"][0]["text"]
+    assert first.startswith("This session is being continued"), first
+    assert s.messages()[1]["content"] == "What is the vault code? Reply with just the code.", s.messages()[1]   # kept verbatim
 
 
 def main(argv):
