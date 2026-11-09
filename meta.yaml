@@ -8,7 +8,13 @@
 #   main ─▶ turn ─▶ prompt ─▶ append user msg ─▶ agent_step   (turn: repeat until /exit)
 #   agent_step ─▶ build request from session JSONL ─▶ POST /v1/messages ─▶ append assistant msg
 #              ─▶ print text ─▶ for_each tool_use: workflow tools.<name>   (agent_step: repeat while stop_reason == tool_use)
-#   Before each call, agent_step compacts the conversation if the last call's context reached compact_at.
+#   Before each call, agent_step compacts the conversation if the last call's context reached compact_at
+#   (keeping the latest compact_keep tokens verbatim); /compact does it at once, /context shows the window.
+#   Session state (scripts/session.py): the permission mode (default, acceptEdits, plan, bypassPermissions)
+#   and the model, changed by /mode, /plan, /model; turn reads them each turn. Before each call,
+#   attachments.py adds reminders (plan mode, a stale todo list, files changed since they were read).
+#   Hooks: SessionStart (main), UserPromptSubmit and SessionEnd (turn), PreToolUse/PostToolUse/Stop
+#   (agent_step), SubagentStop (subagent_step), PreCompact (compact).
 #   Each tool call passes the gate first (hooks.py pre: PreToolUse hooks, permission rules): allow, ask or deny.
 #   tools.<name> (workflows/tools/<name>.yaml) ─▶ (approve) ─▶ run ─▶ append tool_result
 #   Read-only tools (read_file, glob, grep) run in parallel and need no approval; the others run one

@@ -5,28 +5,40 @@
     python3 hooks.py post   <session> <user_settings> < {calls}             -> {message, notes}
     python3 hooks.py prompt <session> <user_settings> < {message, prompt}   -> {message, blocked, reason, notes}
     python3 hooks.py stop   <session> <user_settings>                       -> {block, message, notes}
+    python3 hooks.py subagent-stop <sub_session> <user_settings> <agent_type>  -> {block, message, notes}
+    python3 hooks.py session-start <session> <user_settings> <source>   -> writes <session>.session-start
+    python3 hooks.py session-end   <session> <user_settings> <reason>
+    python3 hooks.py pre-compact   <session> <user_settings> <trigger> < {instructions}
+        -> {blocked, instructions, notes}
 
 Hooks are configured in the settings files (see settings.py) under "hooks": for each event, a list of
 {matcher, hooks: [{type: "command", command, timeout}]}. The matcher is a regular expression over
-Claude Code's tool name (Bash, Read, Write, Edit, Glob, Grep, Skill, Agent); empty or "*" matches
-every tool, and events without tools ignore it. A hook command runs with `sh -c` in the work dir,
+Claude Code's tool name (Bash, Read, Write, Edit, Glob, Grep, Skill, Agent) for the tool events, the
+source for SessionStart (startup, resume, compact), the trigger for PreCompact (manual, auto), the
+reason for SessionEnd (prompt_input_exit, other) and the agent type for SubagentStop; empty or "*"
+matches everything, and UserPromptSubmit and Stop ignore it. A hook command runs with `sh -c` in the work dir,
 gets the event as JSON on stdin (session_id, transcript_path, cwd, hook_event_name, permission_mode,
 and the event's own fields), and answers with its exit code and output:
 
-    exit 0   success; stdout may be JSON (below). For UserPromptSubmit, plain stdout is added as context.
+    exit 0   success; stdout may be JSON (below). For UserPromptSubmit and SessionStart, plain stdout is
+             added as context; for PreCompact, it's added to the summary instructions.
     exit 2   blocking: stderr goes to the model (PreToolUse: the call is denied; PostToolUse: feedback;
-             Stop: the agent keeps going) or, for UserPromptSubmit, to the user, and the prompt is dropped.
+             Stop, SubagentStop: the agent keeps going) or, for UserPromptSubmit, to the user, and the
+             prompt is dropped; for PreCompact, the compaction is cancelled. SessionStart and
+             SessionEnd can't block.
     other    a non-blocking error, shown to the user.
 
-JSON stdout: {"decision": "block", "reason": ...} (PostToolUse, UserPromptSubmit, Stop),
+JSON stdout: {"decision": "block", "reason": ...} (PostToolUse, UserPromptSubmit, Stop, SubagentStop,
+PreCompact),
 {"hookSpecificOutput": {"permissionDecision": "allow"|"deny"|"ask", "permissionDecisionReason": ...,
 "updatedInput": {...}}} (PreToolUse), {"hookSpecificOutput": {"additionalContext": ...}} (PostToolUse,
-UserPromptSubmit), and {"systemMessage": ...} (any, shown to the user).
+UserPromptSubmit, SessionStart, PreCompact), and {"systemMessage": ...} (any, shown to the user).
 
 `pre` decides every tool call of a reply before it runs: allow (run it), ask (prompt first) or deny
-(answer with an error). In order: a hook's deny, a deny rule, a hook's ask, an ask rule, a hook's
-allow, an allow rule; then mutating tools ask unless approve=auto or the path is a .md file in the
-memory dir, and the rest are allowed. Tool input uses the harness's names (path, not file_path);
+(answer with an error). In order: a hook's deny, a deny rule, (non-mutating tools run), plan mode's
+deny of file changes, a hook's ask, an ask rule, a hook's allow, an allow rule; then the permission
+mode (session.py): bypassPermissions runs everything, acceptEdits runs file changes in the work dir;
+otherwise mutating tools ask unless the path is a .md file in the memory dir. Tool input uses the harness's names (path, not file_path);
 hooks see both.
 """
 import json
@@ -35,17 +47,22 @@ import re
 import subprocess
 import sys
 
+import history
 import memory
+import session as session_state
 import settings
 
 DEFAULT_TIMEOUT = 60
+FILE_TOOLS = ("write_file", "edit_file")
+PLAN_DENIED = ("Plan mode is active, so files can't be changed yet. Finish researching, then present your plan "
+               "with the exit_plan_mode tool; the user approves it before any changes are made.")
 STOP_FEEDBACK = "Stop hook feedback:"
 
 
-def payload(session, event, approve="ask", **fields):
+def payload(session, event, mode=None, **fields):
     return {"session_id": os.path.basename(session).removesuffix(".jsonl"), "transcript_path": session,
             "cwd": os.getcwd(), "hook_event_name": event,
-            "permission_mode": "bypassPermissions" if approve == "auto" else "default", **fields}
+            "permission_mode": mode or session_state.mode(main_session(session)), **fields}
 
 
 def configured(loaded, event, tool=None):
@@ -87,6 +104,13 @@ def run(hook, data):
     return p.returncode, out, p.stderr.strip(), parsed if isinstance(parsed, dict) else None
 
 
+def inside_workdir(path):
+    if not isinstance(path, str) or not path:
+        return False
+    full, root = os.path.realpath(path), os.path.realpath(os.getcwd())
+    return full == root or full.startswith(root + os.sep)
+
+
 def label(event, tool=None):
     return f"{event}:{tool}" if tool else event
 
@@ -116,12 +140,12 @@ def from_hook_input(name, updated, original):
     return {**original, **out}
 
 
-def pre_hooks(loaded, session, approve, block, notes):
+def pre_hooks(loaded, session, mode, block, notes):
     """-> (decision or None, reason, block) from the PreToolUse hooks."""
     name, tool = block.get("name"), settings.CC_NAMES.get(block.get("name"), block.get("name"))
     decisions = {}
     for hook in configured(loaded, "PreToolUse", tool):
-        data = payload(session, "PreToolUse", approve, tool_name=tool, tool_use_id=block.get("id"),
+        data = payload(session, "PreToolUse", mode, tool_name=tool, tool_use_id=block.get("id"),
                        tool_input=hook_input(name, block.get("input") or {}))
         code, out, err, parsed = run(hook, data)
         system_message(notes, parsed)
@@ -147,6 +171,7 @@ def pre_hooks(loaded, session, approve, block, notes):
 def pre(session, user_settings, data):
     loaded, notes = settings.load(settings.files(user_settings))
     reply, approve = data.get("reply") or {}, data.get("approve") or "ask"
+    mode = session_state.mode(main_session(session), "bypassPermissions" if approve == "auto" else "default")
     mutating, invalid = set(data.get("mutating_tools") or []), set(reply.get("invalid") or [])
     calls = []
     for block in reply.get("content") or []:
@@ -158,7 +183,7 @@ def pre(session, user_settings, data):
         calls.append(call)
         if block.get("id") in invalid:
             continue   # answered as invalid input; never run, so neither hooks nor rules apply
-        hook, hook_reason, block = pre_hooks(loaded, session, approve, block, notes)
+        hook, hook_reason, block = pre_hooks(loaded, session, mode, block, notes)
         call["block"] = block
         args = block.get("input") or {}
         rule_decision, rule = settings.decide(loaded, name, args)
@@ -168,12 +193,16 @@ def pre(session, user_settings, data):
             call.update(decision="deny", reason=f"Permission to use {tool} has been denied by the rule {rule}.")
         elif name not in mutating:
             pass   # read-only, skill and agent calls run; a subagent's own tools are gated in its loop
+        elif mode == "plan" and name in FILE_TOOLS:
+            call.update(decision="deny", reason=PLAN_DENIED)
         elif hook == "ask" or rule_decision == "ask":
             call["decision"] = "ask"
         elif hook == "allow" or rule_decision == "allow":
             call["reason"] = f"allowed by the PreToolUse hook" if hook == "allow" else f"allowed by {rule}"
-        elif approve == "auto":
+        elif mode == "bypassPermissions":
             pass
+        elif mode == "acceptEdits" and name in FILE_TOOLS and inside_workdir(args.get("path")):
+            call["reason"] = "allowed in accept-edits mode"
         elif name in ("write_file", "edit_file") and memory.owns(data.get("memory_dir") or "", args.get("path")):
             pass   # memory files need no approval
         else:
@@ -273,44 +302,148 @@ def prompt(session, user_settings, data):
     return {"message": message, "blocked": False, "reason": "", "notes": notes}
 
 
-def stop(session, user_settings):
+def last_text(lines):
+    if not lines or lines[-1]["role"] != "assistant":
+        return ""
+    return next((b.get("text", "") for b in reversed(lines[-1]["content"]) if b.get("type") == "text"), "")
+
+
+def main_session(session):
+    """The main session of a subagent's session file (agents.py: <session>.agent-<id>.jsonl)."""
+    return re.sub(r"\.agent-[^/]*\.jsonl$", "", session)
+
+
+def stop(session, user_settings, agent_type=None):
+    """Stop hooks when the main agent is done, or SubagentStop hooks (matched on the agent type) when
+    a subagent is: one may send it back to work with a reason."""
+    event = "SubagentStop" if agent_type else "Stop"
     loaded, notes = settings.load(settings.files(user_settings))
-    hooks = configured(loaded, "Stop")
+    hooks = configured(loaded, event, agent_type)
     if not hooks:
         return {"block": False, "message": None, "notes": notes}
-    lines = []
-    with open(session, encoding="utf-8") as f:
-        lines = [json.loads(line) for line in f if line.strip()]
+    lines = history.read_lines(session)
+    feedback = f"{event} hook feedback:"
     users = [m for m in lines if m["role"] == "user"]
     last = users[-1]["content"] if users else ""
-    active = isinstance(last, list) and bool(last) and str(last[0].get("text", "")).startswith(STOP_FEEDBACK)
-    final = next((b.get("text", "") for b in reversed(lines[-1]["content"]) if b.get("type") == "text"), "") \
-        if lines and lines[-1]["role"] == "assistant" else ""
+    active = isinstance(last, list) and bool(last) and str(last[0].get("text", "")).startswith(feedback)
+    fields = {"stop_hook_active": active, "last_assistant_message": last_text(lines)}
+    if agent_type:
+        main = main_session(session)
+        fields.update(agent_type=agent_type, agent_transcript_path=session,
+                      agent_id=os.path.basename(session)[len(os.path.basename(main)) + len(".agent-"):].removesuffix(".jsonl"))
+        session = main
     reasons = []
     for hook in hooks:
-        code, out, err, parsed = run(hook, payload(session, "Stop", stop_hook_active=active, last_assistant_message=final))
+        code, out, err, parsed = run(hook, payload(session, event, **fields))
         system_message(notes, parsed)
         if code == 2:
             reasons.append(err or f"blocked by {hook['command']}")
         elif code != 0:
-            note_failure(notes, "Stop", hook, code, err)
+            note_failure(notes, event, hook, code, err)
         elif parsed and parsed.get("decision") == "block":
             reasons.append(parsed.get("reason") or f"blocked by {hook['command']}")
     if not reasons:
         return {"block": False, "message": None, "notes": notes}
-    text = STOP_FEEDBACK + "\n" + "\n".join(reasons)
-    notes.append("Stop hook sent the agent back: " + " / ".join(reasons))
+    text = feedback + "\n" + "\n".join(reasons)
+    who = f"{agent_type} agent" if agent_type else "agent"
+    notes.append(f"{event} hook sent the {who} back: " + " / ".join(reasons))
     return {"block": True, "message": {"role": "user", "content": [{"type": "text", "text": text}]}, "notes": notes}
 
 
+def context_hooks(loaded, session, event, matcher, notes, **fields):
+    """Run an event's hooks; -> (blocked reason or None, the context they added). Plain stdout or
+    hookSpecificOutput.additionalContext on exit 0 is context; exit 2 blocks."""
+    context = []
+    for hook in configured(loaded, event, matcher):
+        code, out, err, parsed = run(hook, payload(session, event, **fields))
+        system_message(notes, parsed)
+        if code == 2:
+            return err or f"blocked by {hook['command']}", context
+        if code != 0:
+            note_failure(notes, event, hook, code, err)
+            continue
+        if parsed:
+            if parsed.get("decision") == "block":
+                return parsed.get("reason") or f"blocked by {hook['command']}", context
+            extra = (parsed.get("hookSpecificOutput") or {}).get("additionalContext")
+            if extra:
+                context.append(str(extra))
+        elif out:
+            context.append(out)
+    return None, context
+
+
+def session_start(session, user_settings, source):
+    """SessionStart hooks (matched on the source: startup, resume or compact). What they add is written
+    to <session>.session-start, a context file every main-loop call sends (history.py messages), so it
+    lasts the session, and is made again after a compaction. Exit 2 doesn't block anything."""
+    loaded, notes = settings.load(settings.files(user_settings))
+    _, context = context_hooks(loaded, session, "SessionStart", source, notes, source=source)
+    with open(session + ".session-start", "w", encoding="utf-8") as f:
+        f.write("\n\n".join(f"SessionStart:{source} hook additional context: {c}" for c in context))
+    return {"context": len(context), "notes": notes}
+
+
+def session_end(session, user_settings, reason):
+    """SessionEnd hooks (matched on the reason): for cleanup and logging; they can't block."""
+    loaded, notes = settings.load(settings.files(user_settings))
+    for hook in configured(loaded, "SessionEnd", reason):
+        code, out, err, parsed = run(hook, payload(session, "SessionEnd", reason=reason))
+        system_message(notes, parsed)
+        if code not in (0, 2):
+            note_failure(notes, "SessionEnd", hook, code, err)
+    return {"notes": notes}
+
+
+def pre_compact(session, user_settings, trigger, data):
+    """PreCompact hooks (matched on the trigger: manual or auto). What they print is added to the
+    summary instructions; exit 2 (or decision: block) cancels this compaction."""
+    loaded, notes = settings.load(settings.files(user_settings))
+    instructions = (data.get("instructions") or "").strip()
+    reason, context = context_hooks(loaded, session, "PreCompact", trigger, notes, trigger=trigger,
+                                    custom_instructions=instructions)
+    if reason:
+        notes.append(f"PreCompact hook blocked the compaction: {reason}")
+        return {"blocked": True, "instructions": instructions, "notes": notes}
+    return {"blocked": False, "instructions": "\n\n".join([instructions] * bool(instructions) + context), "notes": notes}
+
+
+def show_notes(notes):
+    """For the events whose workflow step has nothing else to do with the output: print the notes."""
+    if notes:
+        import show
+        out = show.tty()
+        for note in notes:
+            out.write(f"{show.DIM}  ✻ {note}{show.RESET}\n")
+        out.flush()
+
+
+USAGE = """usage: hooks.py pre|post|prompt <session> <user_settings> < input JSON
+       hooks.py stop <session> <user_settings>
+       hooks.py subagent-stop <sub_session> <user_settings> <agent_type>
+       hooks.py session-start <session> <user_settings> <source>      (prints its notes)
+       hooks.py session-end <session> <user_settings> <reason>        (prints its notes)
+       hooks.py pre-compact <session> <user_settings> <trigger> < {instructions}"""
+
+
 def main(argv):
-    if len(argv) != 4 or argv[1] not in ("pre", "post", "prompt", "stop"):
-        sys.exit("usage: hooks.py pre|post|prompt|stop <session> <user_settings> < input JSON")
-    cmd, session, user_settings = argv[1:]
-    if cmd == "stop":
-        out = stop(session, user_settings)
+    cmd, rest = (argv[1], argv[2:]) if len(argv) > 1 else ("", [])
+    if cmd in ("pre", "post", "prompt") and len(rest) == 2:
+        out = {"pre": pre, "post": post, "prompt": prompt}[cmd](*rest, json.load(sys.stdin))
+    elif cmd == "stop" and len(rest) == 2:
+        out = stop(*rest)
+    elif cmd == "subagent-stop" and len(rest) == 3:
+        out = stop(*rest)
+    elif cmd == "session-start" and len(rest) == 3:
+        out = session_start(*rest)
+        show_notes(out["notes"])
+    elif cmd == "session-end" and len(rest) == 3:
+        out = session_end(*rest)
+        show_notes(out["notes"])
+    elif cmd == "pre-compact" and len(rest) == 3:
+        out = pre_compact(*rest, json.load(sys.stdin))
     else:
-        out = {"pre": pre, "post": post, "prompt": prompt}[cmd](session, user_settings, json.load(sys.stdin))
+        sys.exit(USAGE)
     json.dump(out, sys.stdout)
 
 

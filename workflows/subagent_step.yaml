@@ -8,6 +8,7 @@ vars:
   request_base: null
   agent: null          # agents.py start: {system, tools, allowed, model}
   instructions_file: ""   # the main session's CLAUDE.md snapshot (instructions.py context)
+  costs_file: ""          # the main session's usage log, for /cost
 steps:
   - name: build
     type: script_exec
@@ -58,6 +59,7 @@ steps:
     type: set_fact
     vars:
       ok: "not reply.error"
+      stop_blocked: false
 
   - name: show_error
     type: script_exec
@@ -83,6 +85,14 @@ steps:
       path: "{{ sub_session }}"
       append: true
       content: "{{ message | to_json }}\n"
+
+  - name: record_cost
+    type: write_file
+    when: "ok and costs_file"
+    params:
+      path: "{{ costs_file }}"
+      append: true
+      content: "{\"model\": {{ agent.model | to_json }}, \"kind\": \"subagent\", \"usage\": {{ reply.usage | to_json }}}\n"
 
   # Permission rules and PreToolUse hooks apply to a subagent's calls too (scripts/hooks.py pre).
   - name: gate
@@ -195,3 +205,42 @@ steps:
       path: show.py
       args: [notes]
       stdin: "{{ posted.notes }}"
+
+  # SubagentStop hooks, when the subagent is done: one may send it back to work with a reason.
+  - name: stop_hooks
+    type: script_exec
+    when: "ok and reply.stop_reason != 'tool_use'"
+    params:
+      interpreter: python3
+      path: hooks.py
+      args: [subagent-stop, "{{ sub_session }}", "{{ user_settings }}", "{{ agent.name }}"]
+    register: stop_hooks
+
+  - name: parse_stop
+    type: set_fact
+    when: "ok and reply.stop_reason != 'tool_use'"
+    vars:
+      stopped: "{{ stop_hooks.stdout | from_json }}"
+
+  - name: record_stop
+    type: write_file
+    when: "ok and reply.stop_reason != 'tool_use' and stopped.block"
+    params:
+      path: "{{ sub_session }}"
+      append: true
+      content: "{{ stopped.message | to_json }}\n"
+
+  - name: show_stop
+    type: script_exec
+    when: "ok and reply.stop_reason != 'tool_use' and stopped.notes | length > 0"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [notes]
+      stdin: "{{ stopped.notes }}"
+
+  - name: stop_check
+    type: set_fact
+    when: "ok and reply.stop_reason != 'tool_use'"
+    vars:
+      stop_blocked: "stopped.block"

@@ -5,16 +5,40 @@ vars:
   relay_api_key: null
   request_base: null
 steps:
+  # The session's permission mode and model (scripts/session.py): /mode and /model change them, and the
+  # model is passed on to everything this turn calls, shadowing the global.
+  - name: status
+    type: script_exec
+    params:
+      interpreter: python3
+      path: session.py
+      args: [status, "{{ session_file }}", "{{ model }}"]
+    register: status
+
+  - name: parse_status
+    type: set_fact
+    vars:
+      current: "{{ status.stdout | from_json }}"
+
   - name: user_input
     type: prompt
     params:
-      message: "\n>"
+      message: "{% if current.label %}\n{{ current.label }}{% endif %}\n>"
     register: user_input
 
   - name: check_quit
     type: set_fact
     vars:
       quit: "user_input.value == '/exit' or user_input.value == '/quit'"
+
+  # SessionEnd hooks (scripts/hooks.py session-end), as the session ends.
+  - name: session_end
+    type: script_exec
+    when: "quit"
+    params:
+      interpreter: python3
+      path: hooks.py
+      args: [session-end, "{{ session_file }}", "{{ user_settings }}", prompt_input_exit]
 
   # What was typed (scripts/input.py): plain text, @agent-<name> mentions (a reminder added), a
   # /<skill> [args] (the skill's instructions), or /agent <type> <task> (run here, no model call).
@@ -26,6 +50,8 @@ steps:
       path: input.py
       stdin:
         value: "{{ user_input.value }}"
+        session: "{{ session_file }}"
+        max_chars: "{{ max_tool_output }}"
         skill_dirs: ["{{ markov_source_dir }}/skills", "{{ skills_dir }}", "{{ project_skills_dir }}"]
         agent_dirs: ["{{ markov_source_dir }}/agents", "{{ agents_dir }}", "{{ project_agents_dir }}"]
     register: expand
@@ -40,9 +66,11 @@ steps:
     type: set_fact
     when: "not quit"
     vars:
-      send: "not expanded.error and not expanded.command and not expanded.compact"
+      send: "not expanded.error and not expanded.command and not expanded.compact and not expanded.context and not expanded.session_command"
       direct: "expanded.command and not expanded.error"
       compact_now: "expanded.compact and not expanded.error"
+      context_now: "expanded.context"
+      session_now: "expanded.session_command"
       go: false
 
   # UserPromptSubmit hooks (scripts/hooks.py prompt): one may add context to the message, or block it.
@@ -85,19 +113,47 @@ steps:
     workflow: compact
     when: "not quit and compact_now"
     vars:
+      model: "{{ current.model }}"
       session_file: "{{ session_file }}"
       relay_api_key: "{{ relay_api_key }}"
       request_base: "{{ request_base }}"
       manual: true
       instructions: "{{ expanded.compact.instructions }}"
 
+  # /help, /clear, /cost, /resume, /plan, /mode, /model (scripts/session.py command; no turn follows).
+  - name: session_command
+    type: script_exec
+    when: "not quit and session_now"
+    params:
+      interpreter: python3
+      path: session.py
+      args: [command, "{{ session_file }}"]
+      stdin:
+        name: "{{ expanded.session_command.name }}"
+        args: "{{ expanded.session_command.args }}"
+        default_model: "{{ model }}"
+        user_settings: "{{ user_settings }}"
+        prices: "{{ prices }}"
+        sessions_dir: "{{ state_dir }}/sessions"
+        host_workdir: "{{ host_workdir }}"
+
+  # /context: what the context window holds, counted exactly (no turn follows).
+  - name: context
+    workflow: context
+    when: "not quit and context_now"
+    vars:
+      model: "{{ current.model }}"
+      session_file: "{{ session_file }}"
+      relay_api_key: "{{ relay_api_key }}"
+      request_base: "{{ request_base }}"
+
   - name: show_expand
     type: script_exec
-    when: "not quit and (expanded.error or expanded.skill or expanded.mentions)"
+    when: "not quit and (expanded.error or expanded.skill or expanded.mentions or expanded.files)"
     params:
       interpreter: python3
       path: show.py
-      args: [note, "{% if expanded.error %}{{ expanded.error }}{% elif expanded.skill %}loaded skill {{ expanded.skill }}{% else %}asked for agent {{ expanded.mentions | join:', ' }}{% endif %}"]
+      args: [note, "{% if expanded.error %}{{ expanded.error }}{% elif expanded.skill %}loaded skill {{ expanded.skill }}{% else %}{% if expanded.files %}attached {{ expanded.files | join:', ' }}{% if expanded.mentions %}; {% endif %}{% endif %}{% if expanded.mentions %}asked for agent {{ expanded.mentions | join:', ' }}{% endif %}{% endif %}"]
 
   # /agent <type> <task>: the workflow runs the subagent itself, prints its answer, and records the
   # command and its output the way Claude Code records a local command, for the model's next turn.
@@ -118,6 +174,7 @@ steps:
     when: "not quit and direct"
     register: command_agent
     vars:
+      model: "{{ current.model }}"
       block: "{{ block }}"
       session_file: "{{ session_file }}"
       relay_api_key: "{{ relay_api_key }}"
@@ -165,6 +222,7 @@ steps:
     when: "not quit and go"
     register: agent
     vars:
+      model: "{{ current.model }}"
       session_file: "{{ session_file }}"
       relay_api_key: "{{ relay_api_key }}"
       request_base: "{{ request_base }}"
@@ -185,6 +243,7 @@ steps:
     workflow: extract.memories
     when: "not quit and go and extract_memories"
     vars:
+      model: "{{ current.model }}"
       session_file: "{{ session_file }}"
       relay_api_key: "{{ relay_api_key }}"
       request_base: "{{ request_base }}"

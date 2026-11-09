@@ -1,4 +1,4 @@
-# Replaces the conversation with a summary of it (scripts/compact.py): automatically from agent_step
+# Replaces the conversation with a summary of it, keeping the latest messages verbatim (compact_keep) (scripts/compact.py): automatically from agent_step
 # when the context reaches compact_at, or when the user types /compact [instructions]. The summary
 # call sends the main loop's system blocks and tools, so it reads their prompt cache.
 name: compact
@@ -16,18 +16,45 @@ steps:
       path: show.py
       args: [note, "Compacting conversation…"]
 
-  - name: build
+  # PreCompact hooks (scripts/hooks.py pre-compact): may add to the instructions, or cancel.
+  - name: pre_compact
     type: script_exec
     params:
       interpreter: python3
-      path: compact.py
-      args: [request, "{{ session_file }}", "{{ session_file }}.instructions", "{{ session_file }}.context", "{{ session_file }}.skills", "{{ session_file }}.agents"]
+      path: hooks.py
+      args: [pre-compact, "{{ session_file }}", "{{ user_settings }}", "{% if manual %}manual{% else %}auto{% endif %}"]
       stdin:
         instructions: "{{ instructions }}"
+    register: pre_compact
+
+  - name: parse_pre_compact
+    type: set_fact
+    vars:
+      precompact: "{{ pre_compact.stdout | from_json }}"
+
+  - name: show_pre_compact
+    type: script_exec
+    when: "precompact.notes | length > 0"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [notes]
+      stdin: "{{ precompact.notes }}"
+
+  - name: build
+    type: script_exec
+    when: "not precompact.blocked"
+    params:
+      interpreter: python3
+      path: compact.py
+      args: [request, "{{ compact_keep }}", "{{ session_file }}", "{{ session_file }}.instructions", "{{ session_file }}.context", "{{ session_file }}.skills", "{{ session_file }}.agents", "{{ session_file }}.session-start"]
+      stdin:
+        instructions: "{{ precompact.instructions }}"
     register: build
 
   - name: parse_build
     type: set_fact
+    when: "not precompact.blocked"
     vars:
       prepared: "{{ build.stdout | from_json }}"
 
@@ -61,25 +88,50 @@ steps:
       stdin: "{{ response }}"
     register: assembled
 
+  - name: parse_summary
+    type: set_fact
+    when: "not precompact.blocked and prepared.ok"
+    vars:
+      summary_reply: "{{ assembled.stdout | from_json }}"
+
+  - name: record_cost
+    type: write_file
+    when: "not precompact.blocked and prepared.ok and not summary_reply.error"
+    params:
+      path: "{{ session_file }}.costs"
+      append: true
+      content: "{\"model\": {{ model | to_json }}, \"kind\": \"compact\", \"usage\": {{ summary_reply.usage | to_json }}}\n"
+
   - name: apply
     type: script_exec
     when: "prepared.ok"
     params:
       interpreter: python3
       path: compact.py
-      args: [apply, "{{ session_file }}", "{% if manual %}true{% else %}false{% endif %}"]
+      args: [apply, "{{ compact_keep }}", "{{ session_file }}", "{% if manual %}true{% else %}false{% endif %}"]
       stdin: "{{ assembled.stdout }}"
     register: apply
 
   # Rendered as JSON text, which set_fact reads back as a map.
   - name: outcome
     type: set_fact
+    when: "not precompact.blocked"
     vars:
       result: "{% if prepared.ok %}{{ apply.stdout }}{% else %}{{ build.stdout }}{% endif %}"
 
+  # SessionStart hooks with source compact: their context went with the old messages' first one.
+  - name: session_start
+    type: script_exec
+    when: "not precompact.blocked and result.ok"
+    params:
+      interpreter: python3
+      path: hooks.py
+      args: [session-start, "{{ session_file }}", "{{ user_settings }}", compact]
+
   - name: show
     type: script_exec
+    when: "not precompact.blocked"
     params:
       interpreter: python3
       path: show.py
-      args: [note, "{% if result.ok %}Conversation compacted (summary: {{ result.chars }} chars; the full transcript is in {{ result.archive }}){% else %}Compaction skipped: {{ result.error }}{% endif %}"]
+      args: [note, "{% if result.ok %}Conversation compacted (summary: {{ result.chars }} chars{% if result.kept %}; kept the last {{ result.kept }} messages verbatim{% endif %}; the full transcript is in {{ result.archive }}){% else %}Compaction skipped: {{ result.error }}{% endif %}"]

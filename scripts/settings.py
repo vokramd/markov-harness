@@ -30,7 +30,8 @@ PROJECT_FILES = [".claude/settings.json", ".claude/settings.local.json"]
 LOCAL_FILE = ".claude/settings.local.json"
 # Claude Code's tool names, as hooks and rules use them.
 CC_NAMES = {"bash": "Bash", "read_file": "Read", "write_file": "Write", "edit_file": "Edit", "glob": "Glob",
-            "grep": "Grep", "skill": "Skill", "agent": "Agent"}
+            "grep": "Grep", "skill": "Skill", "agent": "Agent", "todo_write": "TodoWrite",
+            "exit_plan_mode": "ExitPlanMode"}
 # Which tools a rule's tool name covers.
 COVERS = {"bash": {"bash"}, "edit": {"edit_file", "write_file"}, "edit_file": {"edit_file"},
           "write": {"write_file"}, "write_file": {"write_file"}, "read": {"read_file"}, "read_file": {"read_file"}}

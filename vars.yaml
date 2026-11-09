@@ -11,6 +11,15 @@ user_instructions: .state/CLAUDE.md     # the user's instructions for every proj
 user_settings: .state/settings.json    # permission rules and hooks, before the work dir's .claude/settings{,.local}.json; bin/harness passes /state/settings.json
 compact_at: 160000                     # compact the conversation once a model call's context reaches this many tokens; 0 never
 compact_max_tokens: 12000              # max_tokens of the summary call
+compact_keep: 8000                     # keep about this many tokens of the latest messages verbatim after the summary; 0 none
+context_window: 1000000                # the model's context window, for /context (1M for the 5.5 models)
+# USD per million tokens, for /cost (from Anthropic's pricing, November 2026; cache_write is the 5-minute rate).
+# Haiku 5.5 bills a call whose prompt is over long_above tokens at the `long` rates.
+prices:
+  claude-haiku-5-5: {input: 0.10, output: 0.50, cache_read: 0.01, cache_write: 0.125,
+                     long_above: 100000, long: {input: 0.50, output: 2.50, cache_read: 0.05, cache_write: 0.625}}
+  claude-sonnet-5-5: {input: 2, output: 10, cache_read: 0.20, cache_write: 2.50}
+  claude-opus-5-5: {input: 4, output: 20, cache_read: 0.20, cache_write: 5}
 max_turns: 100000                      # user turns per session
 max_tool_rounds: 50                    # model calls per user turn while it keeps asking for tools
 extract_memories: true                 # run the extraction pass after each turn
@@ -21,8 +30,11 @@ max_tokens: 4096
 # readable summary, which tty:// shows dimmed. "omitted" gives a silent pause instead.
 thinking_display: summarized
 session: ""          # session JSONL to resume; empty starts a new one
-approve: ask          # ask | auto
+approve: ask          # ask | auto (auto starts in bypassPermissions mode)
+permission_mode: default   # the mode a session starts in: default | acceptEdits | plan | bypassPermissions
+host_workdir: ""      # the work dir's host path (bin/harness), recorded so bin/harness --resume lists its sessions
 max_tool_output: 30000
 readonly_tools: [read_file, glob, grep, skill]  # run in parallel, no approval
 mutating_tools: [bash, write_file, edit_file]  # run one at a time, approved first
 agent_tools: [agent]                           # subagents, one at a time, after the other tools
+session_tools: [todo_write, exit_plan_mode]    # the session's own state, one at a time, no approval

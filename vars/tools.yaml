@@ -100,3 +100,40 @@ tools:
         prompt: {type: string, description: The task for the subagent.}
         subagent_type: {type: string, description: "The agent type to use; default general-purpose."}
       required: [description, prompt]
+  # Claude Code's TodoWrite: the list is shown to the user and kept in <session>.todos (scripts/todos.py).
+  - name: todo_write
+    description: >-
+      Create and update a task list for this session, to track progress on multi-step work and show it to
+      the user. Use it for tasks with three or more steps, when the user gives several tasks at once, or in
+      plan mode to lay out the work; skip it for a single simple task or a question. Each call replaces the
+      whole list. Mark a task in_progress before you start it (exactly one at a time) and completed as soon
+      as it is done, without batching completions; only mark it completed when it is fully done (tests pass,
+      nothing left unfinished). Add tasks you discover along the way, and remove ones that no longer apply.
+    eager_input_streaming: true
+    input_schema:
+      type: object
+      properties:
+        todos:
+          type: array
+          description: The whole updated list.
+          items:
+            type: object
+            properties:
+              content: {type: string, description: "The task, in the imperative: \"Run the tests\"."}
+              status: {type: string, enum: [pending, in_progress, completed]}
+              activeForm: {type: string, description: "The task in the present continuous, shown while it is in progress: \"Running the tests\"."}
+            required: [content, status, activeForm]
+      required: [todos]
+  # Claude Code's ExitPlanMode: in plan mode, asks the user to approve the plan (scripts/session.py exit-plan).
+  - name: exit_plan_mode
+    description: >-
+      Use this when you are in plan mode and have finished planning the implementation of a task: it shows
+      your plan to the user and asks them to approve it, which ends plan mode. Only for tasks that need
+      changes (code, files, commands); not for research or questions, which you just answer. Make the plan
+      concise and concrete: the files to change and how, in markdown.
+    eager_input_streaming: true
+    input_schema:
+      type: object
+      properties:
+        plan: {type: string, description: The plan to approve, in markdown.}
+      required: [plan]

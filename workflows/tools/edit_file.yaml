@@ -115,6 +115,15 @@ steps:
       append: true
       content: "{{ message | to_json }}\n"
 
+  # Its content as the session now knows it, so only later changes are reported (scripts/attachments.py).
+  - name: track
+    type: script_exec
+    when: "done.ok"
+    params:
+      interpreter: python3
+      path: attachments.py
+      args: [track, "{{ session_file }}", "{{ block.input.path }}"]
+
   - name: preview
     type: script_exec
     when: "not done.ok"

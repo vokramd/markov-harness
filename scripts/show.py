@@ -12,6 +12,7 @@ markov captures a step's stdout/stderr, so this writes to /dev/tty (falling back
                                                              so parallel tools don't interleave)
     show.py exit <code>      (after a command whose output streamed live)
     show.py diff             < edit.py diff JSON
+    show.py plan             < the plan's markdown (exit_plan_mode)
     show.py note <text>      (a dim line: something the harness did on its own)
     show.py notes            < JSON list of such lines (hook messages and errors; nothing if empty)
     show.py skill <name>     < skills.py load message (the skill tool: loaded, or why not)
@@ -30,7 +31,8 @@ DIM, BOLD, RED, GREEN, CYAN, RESET = "\033[2m", "\033[1m", "\033[31m", "\033[32m
 MAX_DIFF_LINES = 40
 # Tool names as Claude Code shows them, for lines that get the harness's name (a denied call).
 DISPLAY = {"bash": "Bash", "read_file": "Read", "write_file": "Write", "edit_file": "Edit", "glob": "Glob",
-           "grep": "Grep", "skill": "Skill", "agent": "Agent"}
+           "grep": "Grep", "skill": "Skill", "agent": "Agent", "todo_write": "TodoWrite",
+           "exit_plan_mode": "ExitPlanMode"}
 # bin/harness's memory dir, /state/projects/<work dir with every non-alphanumeric as ->/memory: the
 # key is the whole host path, so a tool line naming a memory file would mostly be the key.
 MEMORY_DIR = re.compile(r"/state/projects/[^/\s]+/memory(?=/|\s|$)")
@@ -126,6 +128,10 @@ def main(argv):
         else:
             uses = argv[2]
             out.write(f"{DIM}  ⎿ Done ({uses} tool use{'' if uses == '1' else 's'} · {argv[3]} model calls){RESET}\n")
+    elif cmd == "plan":
+        out.write(f"\n{GREEN}⏺{RESET} {BOLD}Here is the plan:{RESET}\n")
+        for row in sys.stdin.read().rstrip("\n").splitlines():
+            out.write(f"  {CYAN}│{RESET} {row}\n")
     elif cmd == "note":
         out.write(f"{DIM}  ✻ {argv[2]}{RESET}\n")
     elif cmd == "notes":

@@ -28,10 +28,10 @@ APPROVAL = r"(run|write|apply) it\? \(a: always\) \[y/n/a\]"
 
 
 class Session:
-    def __init__(self, *args, workdir=WORK, extract=False, project=None):
+    def __init__(self, *args, workdir=WORK, extract=False, project=None, first=()):
         # Extraction is off except in the memory tests: it adds a model call per turn, and what it saves
         # in the shared work dir's memory would leak into later tests.
-        args = ["--var", f"model={MODEL}", "--var", f"extract_memories={str(extract).lower()}", *args]
+        args = [*first, "--var", f"model={MODEL}", "--var", f"extract_memories={str(extract).lower()}", *args]
         os.makedirs(workdir, exist_ok=True)
         env = {**os.environ, "HARNESS_WORKDIR": workdir}
         env.pop("HARNESS_PROJECT_ID", None)
@@ -604,16 +604,18 @@ elif event == "Stop" and not data["stop_hook_active"]:
 
 
 def test_compact_command():
-    code = f"vault-{uuid.uuid4().hex[:6]}"
+    code, colour = f"vault-{uuid.uuid4().hex[:6]}", f"mauve-{uuid.uuid4().hex[:6]}"
     s = Session()
     s.say(f"The vault code is {code}. Reply only with: ok")
+    s.say(f"The colour is {colour}. Reply only with: ok")
     out = s.say("/compact")
-    assert "Conversation compacted" in out, out
+    assert "Conversation compacted" in out and "kept the last 2 messages verbatim" in out, out
     msgs = s.messages()
-    assert len(msgs) == 1 and code in msgs[0]["content"][0]["text"], msgs
+    assert len(msgs) == 3 and code in msgs[0]["content"][0]["text"], msgs   # the summary, then the latest exchange
+    assert msgs[1]["content"] == f"The colour is {colour}. Reply only with: ok", msgs[1]
     assert os.path.exists(host_path(s.path) + ".compacted-1.jsonl")
-    out = s.say("What is the vault code? Reply with just the code.")
-    assert code in out, out
+    out = s.say("What are the vault code and the colour? Reply with just the two.")
+    assert code in out and colour in out, out
     s.exit()
 
 
@@ -628,6 +630,140 @@ def test_auto_compaction():
     first = s.messages()[0]["content"][0]["text"]
     assert first.startswith("This session is being continued"), first
     assert s.messages()[1]["content"] == "What is the vault code? Reply with just the code.", s.messages()[1]   # kept verbatim
+
+
+
+def test_context_command():
+    s = Session()
+    s.say("Reply only with: ok")
+    out = s.say("/context")
+    for part in ("Context usage", "System prompt", "Tools", "Messages", "(2 messages)", "Free space", "auto-compacts at"):
+        assert part in out, out
+    assert "estimated" not in out, out                     # counted with count_tokens
+    assert len(s.messages()) == 2                          # no turn, nothing recorded
+    s.exit()
+
+
+def test_session_and_subagent_hooks():
+    work = fresh_workdir("work-session-hooks")
+    target, word, extra = (f"{w}-{uuid.uuid4().hex[:6]}" for w in ("orbit", "tangerine", "precompact"))
+    hook = f"""import json, sys
+data = json.load(sys.stdin)
+event = data["hook_event_name"]
+with open(".claude/events.log", "a") as f:
+    f.write(event + " " + str(data.get("source") or data.get("trigger") or data.get("reason") or data.get("agent_type") or "") + "\\n")
+if event == "SessionStart":
+    print("The deploy target is {target}.")
+elif event == "PreCompact":
+    print("Mention the code word {extra} in the summary.")
+elif event == "SubagentStop" and not data["stop_hook_active"]:
+    print("End your answer with the word {word}.", file=sys.stderr)
+    sys.exit(2)
+"""
+    with open(os.path.join(work, ".claude", "hook.py"), "w", encoding="utf-8") as f:
+        f.write(hook)
+    log = os.path.join(work, ".claude", "events.log")
+    if os.path.exists(log):
+        os.remove(log)
+    each = [{"hooks": [{"type": "command", "command": "python3 .claude/hook.py"}]}]
+    with open(os.path.join(work, ".claude", "settings.json"), "w", encoding="utf-8") as f:
+        json.dump({"hooks": {e: each for e in ("SessionStart", "SessionEnd", "PreCompact", "SubagentStop")}}, f)
+    s = Session(workdir=work)
+    out = s.say("What is the deploy target? Reply with just the target.")
+    assert target in out, out                                         # SessionStart context
+    out = s.say("/agent general-purpose Reply with only the word: hello")
+    assert "SubagentStop hook sent the general-purpose agent back" in out and word in out.split("sent the")[-1], out
+    out = s.say("/compact")
+    assert "Conversation compacted" in out, out
+    assert extra in s.messages()[0]["content"][0]["text"]             # PreCompact added to the instructions
+    out = s.say("What is the deploy target? Reply with just the target.")
+    assert target in out, out                                         # SessionStart:compact context again
+    s.exit()
+    with open(log, encoding="utf-8") as f:
+        events = f.read().split("\n")
+    assert events[:2] == ["SessionStart startup", "SubagentStop general-purpose"], events
+    assert "PreCompact manual" in events and "SessionStart compact" in events, events
+    assert events[-2] == "SessionEnd prompt_input_exit", events
+
+
+PLAN_PROMPT = r"Would you like to proceed\? \(y: yes, a: yes and accept edits, n: no, keep planning\) \[y/a/n\]"
+
+
+def test_todo_list():
+    s = Session()
+    out = s.say("Use the todo_write tool to make a todo list with exactly these three items, the first in_progress: "
+                "Draft outline, Write chapter, Proofread. Then reply with only: done")
+    assert "Update Todos" in out and "Draft outline" in out and "Proofread" in out, out
+    s.exit()
+    with open(host_path(s.path) + ".todos", encoding="utf-8") as f:
+        items = json.load(f)
+    assert [t["content"] for t in items] == ["Draft outline", "Write chapter", "Proofread"], items
+    assert items[0]["status"] == "in_progress"
+
+
+def test_plan_mode():
+    work = fresh_workdir("work-plan")
+    name = f"plan-{uuid.uuid4().hex[:6]}.txt"
+    s = Session(workdir=work)
+    out = s.say("/plan")
+    assert "plan mode on" in out, out
+    out = s.say_until(f"Create a file named {name} containing the single word hello. It's a one-step task and "
+                      "there is nothing to research: don't use bash or other tools, present the plan right away.", PLAN_PROMPT)
+    assert "Here is the plan" in out and name in out.split("Here is the plan")[-1], out
+    assert not os.path.exists(os.path.join(work, name))
+    out = s.answer("a")                                     # approve, and accept edits: no write approval
+    assert "plan approved; permission mode: acceptEdits" in out and "allowed in accept-edits mode" in out, out
+    assert "accept edits on" in out.split("allowed in accept-edits mode")[-1], out   # the prompt shows the mode
+    s.exit()
+    with open(os.path.join(work, name), encoding="utf-8") as f:
+        assert f.read().strip() == "hello"
+    assert any("Plan mode is active" in r for r in reminders(s.messages()))
+
+
+def test_at_mention_and_changed_file():
+    work = fresh_workdir("work-mention")
+    first, second = (f"{w}-{uuid.uuid4().hex[:6]}" for w in ("lemon", "lime"))
+    note = os.path.join(work, "note.txt")
+    with open(note, "w", encoding="utf-8") as f:
+        f.write(f"intro\nThe secret is {first}.\nend\n")
+    s = Session(workdir=work)
+    out = s.say("What is the secret in @note.txt? Reply with just the secret, without using any tools.")
+    assert "attached /work/note.txt" in out and first in out.split("attached")[-1] and "Read(" not in out, out
+    with open(note, "w", encoding="utf-8") as f:
+        f.write(f"intro\nThe secret is {second}.\nend\n")
+    out = s.say("What is the secret in that file now? Don't use any tools; reply with just the secret.")
+    assert second in out and "Read(" not in out, out
+    s.exit()
+    changed = [r for r in reminders(s.messages()) if "was modified" in r]
+    assert len(changed) == 1 and f"     2\tThe secret is {second}." in changed[0], changed
+
+
+def test_session_commands():
+    work = fresh_workdir("work-commands")
+    s = Session(workdir=work)
+    out = s.say("/help")
+    assert "/clear" in out and "/model" in out and "@path" in out, out
+    out = s.say("/mode")
+    assert "permission mode: acceptEdits" in out and "accept edits on" in out, out
+    s.say("/mode default")
+    out = s.say("/model sonnet")
+    assert "model set to claude-sonnet-5-5" in out, out
+    s.say("Reply only with: ok")
+    out = s.say("/cost")
+    assert "Total cost:" in out and "claude-sonnet-5-5:" in out and "$" in out, out
+    out = s.say("/clear")
+    assert "conversation cleared" in out, out
+    assert s.messages() == [] and os.path.exists(host_path(s.path) + ".cleared-1.jsonl")
+    word = f"walnut-{uuid.uuid4().hex[:6]}"
+    s.say(f"The password is {word}. Reply only with: ok")
+    s.exit()
+    t = Session(workdir=work, first=["--continue"])           # this work dir's latest session
+    assert t.path == s.path, (t.path, s.path)
+    out = t.say("/resume")
+    assert "no other sessions" in out or "msgs" in out, out
+    out = t.say("What is the password? Reply with just it.")
+    assert word in out and "claude-sonnet-5-5" in t.transcript.split("session=")[0], t.transcript[:300]   # model kept
+    t.exit()
 
 
 def main(argv):

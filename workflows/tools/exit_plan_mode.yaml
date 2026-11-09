@@ -1,0 +1,59 @@
+# Claude Code's ExitPlanMode: show the plan and ask the user to approve it. y: approve, back to the
+# default mode; a: approve and accept edits; n: keep planning (scripts/session.py exit-plan).
+name: tools.exit_plan_mode
+vars:
+  block: null
+  session_file: null
+steps:
+  - name: status
+    type: script_exec
+    params:
+      interpreter: python3
+      path: session.py
+      args: [status, "{{ session_file }}", "{{ model }}"]
+    register: status
+
+  - name: parse_status
+    type: set_fact
+    vars:
+      current: "{{ status.stdout | from_json }}"
+
+  - name: check_planning
+    type: set_fact
+    vars:
+      planning: "current.mode == 'plan'"
+
+  - name: show_plan
+    type: script_exec
+    when: "planning"
+    params:
+      interpreter: python3
+      path: show.py
+      args: [plan]
+      stdin: "{{ block.input.plan }}"
+
+  - name: approval
+    type: prompt
+    when: "planning"
+    params:
+      message: "  Would you like to proceed? (y: yes, a: yes and accept edits, n: no, keep planning)"
+      choices: ["y", "a", "n"]
+      default: "y"
+      case_insensitive: true
+    register: approval
+
+  - name: decide
+    type: script_exec
+    params:
+      interpreter: python3
+      path: session.py
+      args: [exit-plan, "{{ session_file }}", "{% if planning %}{{ approval.value }}{% endif %}"]
+      stdin: "{{ block }}"
+    register: decide
+
+  - name: record
+    type: write_file
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ decide.stdout | trim }}\n"

@@ -1,7 +1,13 @@
 """What the user typed, turned into what the harness does with it.
 
-    python3 input.py < {value, skill_dirs, agent_dirs}   -> {message, skill, mentions, command, compact, error}
+    python3 input.py < {value, skill_dirs, agent_dirs}   -> {message, skill, mentions, command, compact, context, session_command, files, error}
 
+- `/help`, `/clear`, `/cost`, `/resume`, `/plan`, `/model [name]` and `/mode [name]` are session commands
+  (session.py command): `session_command` is {name, args}, and `message` is null.
+- `@path` words naming a file or directory attach it (attachments.mentions): its contents, or its
+  listing, as reminders after the text, the way Claude Code adds a Read call; `files` lists them.
+- `/context` shows how full the context window is (context workflow): `context` is true, and
+  `message` is null.
 - `/compact [instructions]` compacts the conversation now (compact workflow): `compact` is
   {instructions}, and `message` is null.
 
@@ -18,8 +24,12 @@ import re
 import sys
 
 import agents
+import attachments
 import skills
 
+CONTEXT_COMMAND = re.compile(r"^/context\s*$")
+SESSION_COMMAND = re.compile(r"^/(help|clear|cost|resume|plan|model|mode)(?:\s+(.*))?$", re.S)
+NO_ARGS = ("help", "clear", "cost", "resume", "plan")
 COMPACT_COMMAND = re.compile(r"^/compact(?:\s+(.*))?$", re.S)
 AGENT_COMMAND = re.compile(r"^/agent(?:\s+(\S+))?(?:\s+(.*))?$", re.S)
 MENTION = re.compile(r"(?<![\w@])@agent-([A-Za-z0-9][A-Za-z0-9_.-]*[A-Za-z0-9]|[A-Za-z0-9])")
@@ -27,9 +37,15 @@ REMINDER = ('<system-reminder>The user has expressed a desire to invoke the agen
             "agent appropriately, passing in the required context to it.</system-reminder>")
 
 
-def expand(value, skill_dirs, agent_dirs):
-    out = {"message": None, "skill": None, "mentions": [], "command": None, "compact": None, "error": None}
+def expand(value, skill_dirs, agent_dirs, session="", max_chars=30000):
+    out = {"message": None, "skill": None, "mentions": [], "command": None, "compact": None, "context": False,
+           "session_command": None, "files": [], "error": None}
     text = value.strip()
+    if CONTEXT_COMMAND.match(text):
+        return {**out, "context": True}
+    m = SESSION_COMMAND.match(text)
+    if m and not (m.group(1) in NO_ARGS and m.group(2)):
+        return {**out, "session_command": {"name": m.group(1), "args": (m.group(2) or "").strip()}}
     m = COMPACT_COMMAND.match(text)
     if m:
         return {**out, "compact": {"instructions": (m.group(1) or "").strip()}}
@@ -51,15 +67,17 @@ def expand(value, skill_dirs, agent_dirs):
     for name in MENTION.findall(value):
         if name in types and name not in mentions:
             mentions.append(name)
-    if not mentions:
+    files, attached = attachments.mentions(session, value, int(max_chars))
+    if not mentions and not files:
         return {**out, "message": {"role": "user", "content": value}}
-    blocks = [{"type": "text", "text": value}] + [{"type": "text", "text": REMINDER.format(name=n)} for n in mentions]
-    return {**out, "message": {"role": "user", "content": blocks}, "mentions": mentions}
+    blocks = [{"type": "text", "text": value}] + files + [{"type": "text", "text": REMINDER.format(name=n)} for n in mentions]
+    return {**out, "message": {"role": "user", "content": blocks}, "mentions": mentions, "files": attached}
 
 
 def main():
     data = json.load(sys.stdin)
-    json.dump(expand(data.get("value") or "", data.get("skill_dirs") or [], data.get("agent_dirs") or []), sys.stdout)
+    json.dump(expand(data.get("value") or "", data.get("skill_dirs") or [], data.get("agent_dirs") or [],
+                     data.get("session") or "", data.get("max_chars") or 30000), sys.stdout)
 
 
 if __name__ == "__main__":

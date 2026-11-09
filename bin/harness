@@ -20,6 +20,8 @@
 #   HARNESS_WORKDIR=~/src/project bin/harness
 #   HARNESS_PROJECT_ID=myproject bin/harness    # memory shared by every work dir with this ID
 #   bin/harness --print-memory-dir             # where this work dir's memory lives on the host
+#   bin/harness --continue                     # resume this work dir's latest session
+#   bin/harness --resume                       # pick one of this work dir's sessions to resume
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -55,6 +57,24 @@ case "$workdir" in
         echo "harness: refusing to mount $workdir as the tool work dir; set HARNESS_WORKDIR to a project dir" >&2
         exit 2 ;;
 esac
+# --continue / --resume: pick a session of this work dir (scripts/session.py list reads <session>.meta).
+if [ "${1:-}" = "--continue" ] || [ "${1:-}" = "--resume" ]; then
+    mode="$1"; shift
+    if [ "$mode" = "--continue" ]; then
+        name="$(python3 "$here/scripts/session.py" list "$state/sessions" "$workdir" latest)"
+        [ -n "$name" ] || { echo "harness: no sessions for $workdir yet" >&2; exit 2; }
+    else
+        listing="$(python3 "$here/scripts/session.py" list "$state/sessions" "$workdir")"
+        count="$(printf '%s' "$listing" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+        [ "$count" -gt 0 ] || { echo "harness: no sessions for $workdir yet" >&2; exit 2; }
+        printf '%s' "$listing" | python3 -c 'import json,sys; [print(s["line"]) for s in json.load(sys.stdin)]' >&2
+        read -r -p "resume which? [1-$count] " pick
+        name="$(printf '%s' "$listing" | python3 -c 'import json,sys; s=json.load(sys.stdin); i=int(sys.argv[1]); print(s[i-1]["name"] if 1 <= i <= len(s) else "")' "$pick" 2>/dev/null || true)"
+        [ -n "$name" ] || { echo "harness: no session $pick" >&2; exit 2; }
+    fi
+    set -- --var "session=/state/sessions/$name" "$@"
+fi
+
 [ -r "$key" ] || { echo "harness: missing relay key at $key" >&2; exit 2; }
 relay_ip="$(getent ahostsv4 "$relay_host" | awk 'NR==1 {print $1}')"
 [ -n "$relay_ip" ] || { echo "harness: cannot resolve $relay_host" >&2; exit 2; }
@@ -97,4 +117,5 @@ exec podman run --rm "${tty_flags[@]}" \
     sh -c 'exec markov run /harness --state-store /state/markov-state.db \
              --callback "tty://?show=text,thinking:dim,output:lines,tool_input:count" --var state_dir=/state --var relay_key_file=/run/secrets/relay-api-key "$@" 2>>/state/markov.log' \
     harness --var "memory_dir=$memory_dir" --var skills_dir=/state/skills --var agents_dir=/state/agents \
-    --var user_instructions=/state/CLAUDE.md --var user_settings=/state/settings.json "$@"
+    --var user_instructions=/state/CLAUDE.md --var user_settings=/state/settings.json \
+    --var "host_workdir=$workdir" "$@"

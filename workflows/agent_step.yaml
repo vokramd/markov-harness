@@ -26,12 +26,21 @@ steps:
       manual: false
       instructions: ""
 
+  # Reminders Claude Code attaches on its own (scripts/attachments.py): plan mode, a stale todo list,
+  # files changed since the session read them. Appended to the session as a user message.
+  - name: attachments
+    type: script_exec
+    params:
+      interpreter: python3
+      path: attachments.py
+      args: [before, "{{ session_file }}"]
+
   - name: build
     type: script_exec
     params:
       interpreter: python3
       path: history.py
-      args: [messages, "{{ session_file }}", "{{ session_file }}.instructions", "{{ session_file }}.context", "{{ session_file }}.skills", "{{ session_file }}.agents"]
+      args: [messages, "{{ session_file }}", "{{ session_file }}.instructions", "{{ session_file }}.context", "{{ session_file }}.skills", "{{ session_file }}.agents", "{{ session_file }}.session-start"]
     register: history
 
   - name: reply_gap
@@ -114,6 +123,15 @@ steps:
       append: true
       content: "{{ message | to_json }}\n"
 
+  # Each call's usage, for /cost (scripts/session.py).
+  - name: record_cost
+    type: write_file
+    when: "ok"
+    params:
+      path: "{{ session_file }}.costs"
+      append: true
+      content: "{\"model\": {{ model | to_json }}, \"kind\": \"main\", \"usage\": {{ reply.usage | to_json }}}\n"
+
   # The context size, for compact_check before the next call.
   - name: record_usage
     type: write_file
@@ -187,6 +205,18 @@ steps:
       reason: "{{ call.reason }}"
       suggest: "{{ call.suggest }}"
 
+  # The todo list and exit_plan_mode (which asks the user): one at a time, no approval.
+  - name: run_session_tools
+    when: "ok"
+    for_each: gated.calls
+    as: call
+    for_each_when: "call.decision != 'deny' and call.block.name in session_tools and not (call.block.id in reply.invalid)"
+    concurrency: 1
+    workflow: "tools.{{ call.block.name }}"
+    vars:
+      block: "{{ call.block }}"
+      session_file: "{{ session_file }}"
+
   # Subagents, after the other tools: one at a time, since their own tools may ask for approval.
   - name: run_agents
     when: "ok"
@@ -216,7 +246,7 @@ steps:
     when: "ok"
     for_each: gated.calls
     as: call
-    for_each_when: "call.decision != 'deny' and (call.block.id in reply.invalid or not (call.block.name in readonly_tools or call.block.name in mutating_tools or call.block.name in agent_tools))"
+    for_each_when: "call.decision != 'deny' and (call.block.id in reply.invalid or not (call.block.name in readonly_tools or call.block.name in mutating_tools or call.block.name in agent_tools or call.block.name in session_tools))"
     workflow: tools.unknown
     vars:
       block: "{{ call.block }}"

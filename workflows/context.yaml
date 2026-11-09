@@ -1,0 +1,85 @@
+# /context: how full the context window is (scripts/window.py). Four count_tokens calls, each adding a
+# part to the one before (system blocks, tools, messages), give each part's exact size; no model call.
+name: context
+vars:
+  session_file: null
+  relay_api_key: null
+  request_base: null
+steps:
+  - name: build
+    type: script_exec
+    params:
+      interpreter: python3
+      path: window.py
+      args: [request, "{{ session_file }}", "{{ session_file }}.instructions", "{{ session_file }}.context", "{{ session_file }}.skills", "{{ session_file }}.agents", "{{ session_file }}.session-start"]
+      stdin:
+        model: "{{ model }}"
+        thinking: "{{ request_base.thinking }}"
+        system: "{{ request_base.system }}"
+        tools: "{{ tools }}"
+    register: build
+
+  - name: parse_build
+    type: set_fact
+    vars:
+      counts: "{{ build.stdout | from_json }}"
+
+  - name: count_base
+    type: http_request
+    params:
+      method: POST
+      url: "{{ relay_base_url }}/v1/messages/count_tokens"
+      headers:
+        x-api-key: "{{ relay_api_key }}"
+        anthropic-version: "2023-06-01"
+      ignore_status: true
+      body: "{{ counts.base }}"
+    register: count_base
+
+  - name: count_system
+    type: http_request
+    params:
+      method: POST
+      url: "{{ relay_base_url }}/v1/messages/count_tokens"
+      headers:
+        x-api-key: "{{ relay_api_key }}"
+        anthropic-version: "2023-06-01"
+      ignore_status: true
+      body: "{{ counts.system }}"
+    register: count_system
+
+  - name: count_tools
+    type: http_request
+    params:
+      method: POST
+      url: "{{ relay_base_url }}/v1/messages/count_tokens"
+      headers:
+        x-api-key: "{{ relay_api_key }}"
+        anthropic-version: "2023-06-01"
+      ignore_status: true
+      body: "{{ counts.tools }}"
+    register: count_tools
+
+  - name: count_full
+    type: http_request
+    params:
+      method: POST
+      url: "{{ relay_base_url }}/v1/messages/count_tokens"
+      headers:
+        x-api-key: "{{ relay_api_key }}"
+        anthropic-version: "2023-06-01"
+      ignore_status: true
+      body: "{{ counts.full }}"
+    register: count_full
+
+  - name: report
+    type: script_exec
+    params:
+      interpreter: python3
+      path: window.py
+      args: [report, "{{ session_file }}", "{{ context_window }}", "{{ compact_at }}", "{{ session_file }}.instructions", "{{ session_file }}.context", "{{ session_file }}.skills", "{{ session_file }}.agents", "{{ session_file }}.session-start"]
+      stdin:
+        counts: ["{{ count_base }}", "{{ count_system }}", "{{ count_tools }}", "{{ count_full }}"]
+        model: "{{ model }}"
+        system: "{{ request_base.system }}"
+        tools: "{{ tools }}"

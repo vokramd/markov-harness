@@ -12,10 +12,14 @@ bin/harness                                            # new session; tools act 
 HARNESS_WORKDIR=~/src/project bin/harness              # tools act on another dir
 HARNESS_PROJECT_ID=myproject bin/harness               # share one memory across work dirs
 bin/harness --var session=/state/sessions/<id>.jsonl   # resume one
-bin/harness --var approve=auto                         # run tools without asking
+bin/harness --var approve=auto                         # run tools without asking (bypassPermissions mode)
+bin/harness --var permission_mode=plan                 # start in plan mode (or acceptEdits)
+bin/harness --continue                                 # resume this work dir's latest session
+bin/harness --resume                                   # pick one of this work dir's sessions
 bin/harness --var model=claude-sonnet-5-5
 bin/harness --var thinking_display=omitted            # hide the model's thinking (it still thinks)
 bin/harness --var compact_at=100000                    # compact the conversation sooner (default 160000 tokens)
+bin/harness --var context_window=1000000               # the window /context measures against (default 200000)
 python3 tests/test_harness.py                          # end-to-end tests (pexpect, real relay, container)
 python3 tests/test_scripts.py                          # unit tests of the scripts (no model, no container)
 ../markov/bin/static/markov validate .                 # check the workflow without running it
@@ -33,12 +37,13 @@ one file per workflow:
 | `vars/prompts.yaml` | The identity line and the system prompt |
 | `vars/tools.yaml` | The tool definitions offered to the model |
 | `workflows/main.yaml` | Session setup: key, session file, the instructions, memory, skill and agent snapshots, the shared request blocks; repeats `turn` |
-| `workflows/turn.yaml` | One user turn: prompt, UserPromptSubmit hooks, record, repeat `agent_step`, memory extraction; `/compact` |
+| `workflows/turn.yaml` | One user turn: prompt, UserPromptSubmit hooks, record, repeat `agent_step`, memory extraction; `/compact`, `/context`; SessionEnd hooks on `/exit` |
 | `workflows/agent_step.yaml` | One model call (compacting first when the context is full), the gate, the tools it asks for, PostToolUse and Stop hooks |
-| `workflows/compact.yaml` | Compaction: summarize the conversation and replace it with the summary |
+| `workflows/compact.yaml` | Compaction: PreCompact hooks, summarize the conversation and replace it with the summary and the latest messages |
+| `workflows/context.yaml` | `/context`: count the context window's parts with `count_tokens` and show them |
 | `workflows/extract/memories.yaml`, `extract/step.yaml` | The memory extraction pass: `extract.memories`, `extract.step` |
 | `workflows/tools/*.yaml` | One workflow per tool, named by its path: `tools.bash`, `tools.read_file`, …, `tools.denied`, `tools.unknown` |
-| `scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`, `skills.py`, `agents.py`, `input.py`, `instructions.py`, `compact.py`, `settings.py`, `hooks.py`) |
+| `scripts/` | The Python the steps run (`history.py`, `show.py`, `edit.py`, `search.py`, `memory.py`, `skills.py`, `agents.py`, `input.py`, `instructions.py`, `compact.py`, `settings.py`, `hooks.py`, `window.py`, `session.py`, `todos.py`, `attachments.py`) |
 | `skills/` | Skills that ship with the harness, one `<name>/SKILL.md` folder each (see [Skills](#skills)) |
 | `agents/` | Subagent types that ship with the harness: `general-purpose` and `Explore` (see [Subagents](#subagents)) |
 | `workflows/subagent_step.yaml`, `agent/run.yaml` | A subagent: one model call and its tools, and `agent.run`, which starts one, repeats that and collects its answer (for the tool and for `/agent`) |
@@ -97,6 +102,8 @@ project (`markov-harness`) and can be rotated or revoked from the relay admin AP
 | `write_file` | asks, except `.md` files in the memory dir and paths a rule allows | Create or replace a file |
 | `edit_file` | asks, after showing the diff, except `.md` files in the memory dir and paths a rule allows | Replace `old_string` with `new_string`; it must occur exactly once unless `replace_all`. `scripts/edit.py` plans the change, the diff is shown, and `apply` checks again before writing |
 | `skill` | never | Load a skill's instructions (see [Skills](#skills)) |
+| `todo_write` | never | Replace the session's todo list (see [Todo list](#todo-list)); shown as a checklist |
+| `exit_plan_mode` | asks the user to approve the plan | In plan mode, present a plan (see [Permission modes](#permission-modes)) |
 | `agent` | never itself; the subagent's own `bash`/`write_file`/`edit_file` ask | Hand a task to a subagent (see [Subagents](#subagents)) |
 | `read_file`, `glob`, `grep` | never | Read-only; several in one reply run in parallel (`concurrency: 4`), each printing its call and result together so they don't interleave. `scripts/search.py` skips `.git`, `node_modules` and the like and stops at 200 results |
 
@@ -105,6 +112,59 @@ runs, asks, or is denied (`tools.denied` answers it with the reason). Read-only 
 independent. Tools stream their input (`eager_input_streaming`), shown as a `… tool input: N chars` line while
 the model writes it; `history.py assemble` checks the input is a JSON object, and one that isn't (cut off by
 `max_tokens`) gets an error result instead of running.
+
+## Session commands
+
+| Command | |
+|---|---|
+| `/help` | the commands |
+| `/clear` | start over in the same session file; the old conversation is copied to `<session>.cleared-<n>.jsonl`, and the todo list, tracked files and usage are reset (SessionEnd and SessionStart hooks run with reason/source `clear`) |
+| `/compact [focus]` | see [Compaction](#compaction) |
+| `/context` | see [Context](#context) |
+| `/cost` | tokens by model and what they cost at API prices (`prices` in `vars.yaml`), over every model call: main loop, compaction, subagents and memory extraction (`<session>.costs`) |
+| `/model [name]` | show or switch the model for the rest of the session: `haiku`, `sonnet`, `opus` or a model id. Kept on resume |
+| `/mode [name]`, `/plan` | cycle (default → acceptEdits → plan) or set the [permission mode](#permission-modes); `/plan` toggles plan mode |
+| `/resume` | list this work dir's other sessions; quit and run `bin/harness --resume` to pick one, or `--continue` for the latest |
+| `/agent <type> <task>`, `/<skill>` | see [Subagents](#subagents) and [Skills](#skills) |
+
+The mode and model live in `<session>.state` (`scripts/session.py`). Each turn reads them first and passes the
+model to everything it calls, shadowing the global `model` var. `bin/harness` records the host work dir in
+`<session>.meta`, which `--resume` and `--continue` use to find this work dir's sessions.
+
+## Permission modes
+
+Claude Code's modes, shown above the prompt when not `default` (`⏸ plan mode on`, `⏵⏵ accept edits on`):
+
+- **default:** `bash`, `write_file` and `edit_file` ask, unless a rule or hook decides.
+- **acceptEdits:** `write_file` and `edit_file` inside the work dir run without asking (`✻ allowed in accept-edits
+  mode`); `bash` still asks.
+- **plan:** `write_file` and `edit_file` are denied, and each turn starts with Claude Code's plan-mode reminder:
+  research with read-only tools, then call `exit_plan_mode` with the plan. The harness shows the plan and asks
+  `y` (approve; back to default), `a` (approve and accept edits) or `n` (keep planning). Leaving plan mode with
+  `/mode` or `/plan` instead tells the model it may now act.
+- **bypassPermissions:** nothing asks (`approve=auto` starts here). Deny and ask rules still apply.
+
+Subagents' calls follow the main session's mode.
+
+## Todo list
+
+The `todo_write` tool (Claude Code's TodoWrite, `scripts/todos.py`) keeps a checklist in `<session>.todos`,
+shown after each update (`☐`, bold while in progress, `☒` struck through when done). When the model hasn't
+used it for 10 replies, Claude Code's gentle reminder, with the current list, comes before its next call.
+Subagents don't get it.
+
+## Attachments
+
+What the harness adds to the conversation on its own (`scripts/attachments.py`):
+
+- **`@path` mentions:** a word like `@src/app.py` or `@src` in a message attaches the file's contents (with line
+  numbers) or the directory's listing, the way Claude Code adds them: as a Read (or `ls`) call and its result
+  in `<system-reminder>`s after the text. `✻ attached …` names them. `@agent-<name>` stays a subagent mention.
+- **Changed files:** every file the session read, wrote, edited or attached is tracked with its content
+  (`<session>.reads`). Before each model call, one that changed since (the user edited it, a formatter ran, a
+  command rewrote it) is reported once, with the changed lines and their numbers, so the model doesn't work
+  from a stale copy.
+- **Reminders** for plan mode and the todo list (above), before the call.
 
 ## Instructions (CLAUDE.md)
 
@@ -132,11 +192,42 @@ A copy of Claude Code's compaction (`workflows/compact.yaml`, `scripts/compact.p
 - **How:** one model call with the conversation and a summary prompt modelled on Claude Code's (an `<analysis>`,
   then a `<summary>` with the requests, files and code, errors, every user message, pending tasks and the current
   work). It sends the main loop's system blocks and tools, so it reads their prompt cache, and is told not to call tools.
+- **What stays:** the latest messages that fit in `compact_keep` tokens (8,000, estimated at 4 characters a token;
+  `0` keeps none) are left out of the summary and kept verbatim after it, so the model sees its recent work exactly.
+  The kept part starts at an assistant message or a user message without tool results, so every tool_result keeps
+  its tool_use, and at least one assistant message is summarized. A message the user just typed (compaction before
+  a turn's first call) is always kept, so the summary can't swallow the question.
 - **After:** the old session is copied to `<session>.compacted-<n>.jsonl`, and the session becomes one user
-  message: the summary, that file's path (the model can `read_file` it for details) and, when automatic, Claude
-  Code's instruction to carry on without recapping. The instruction, memory, skill and agent reminders are added
-  again as usual, and nested instruction files are sent again when next read.
-- Not (yet): keeping the most recent messages verbatim after the summary, and re-attaching recently read files.
+  message: the summary, that file's path (the model can `read_file` it for details) and, when automatic with no
+  typed message kept, Claude Code's instruction to carry on without recapping; then the kept messages. The
+  instruction, memory, skill and agent reminders are added again as usual, SessionStart hooks run again (source
+  `compact`), and nested instruction files are sent again when next read.
+- **Hooks:** PreCompact hooks run first (matcher `manual` or `auto`): what they print is added to the summary
+  instructions, and exit 2 cancels the compaction.
+- Not (yet): re-attaching recently read files.
+
+## Context
+
+`/context` shows how full the context window is, like Claude Code's (`workflows/context.yaml`, `scripts/window.py`):
+
+```
+  Context usage · claude-haiku-5-5
+  ⛁⛁⛁⛁⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶  2.9k / 200k tokens (1.5%)
+
+  ⛁ System prompt      880    0.4%
+  ⛁ Tools             1.9k    0.9%
+  ⛁ Agent types        180    0.1%
+  ⛁ Messages            18    0.0%  (2 messages)
+  ⛶ Free space      197.1k   98.5%
+
+  auto-compacts at 160k (157.1k to go) · the last model call used 2.9k
+```
+
+Four `count_tokens` calls, each adding a part to the one before (a one-word message, the system blocks, the tools,
+the real messages), give the exact size of each part as the next call would send it; no model call is made. The
+messages are split further by their share of the characters into the reminders (CLAUDE.md, memory, skills, agent
+types, SessionStart context) and the conversation. If counting fails, every part is estimated (and marked `~`).
+The window is `context_window` (200,000).
 
 ## Permissions
 
@@ -154,7 +245,8 @@ dir's `.claude/settings.json` and `.claude/settings.local.json`:
   `Bash(cmd:*)` that command with or without more words. `Edit(glob)` covers `write_file` and `edit_file`
   (`Write(...)` only `write_file`), with the glob relative to the work dir (`//` for an absolute path; `*` stays in a
   directory, `**` crosses them). The harness's names work too (`bash(...)`, `edit_file(...)`).
-- **Order:** deny, then ask, then allow; ask rules prompt even with `approve=auto`. Read-only tools need no rule.
+- **Order:** deny, then ask, then allow; ask rules prompt even in bypassPermissions mode (`approve=auto`).
+  Read-only tools need no rule. See also [Permission modes](#permission-modes).
 - **Compound commands:** a command with `;`, `&`, `|`, `<`, `>`, a backtick, `$(` or a newline only matches an allow
   rule written for exactly that command, so `Bash(git diff *)` can't pass `git diff; rm -rf x`. Deny and ask rules
   also match each part. This is a convenience, not a sandbox: the container is the sandbox.
@@ -176,17 +268,21 @@ Claude Code's command hooks (`scripts/hooks.py`), configured in the same setting
 | `PostToolUse` | after a reply's tool calls ran | exit 2, `decision: block` or `additionalContext`: a reminder to the model after the results |
 | `UserPromptSubmit` | before a prompt is sent | stdout or `additionalContext`: context after the prompt; exit 2 or `decision: block`: drop the prompt |
 | `Stop` | when the model ends its turn | exit 2 or `decision: block`: send it back to work with the reason (`stop_hook_active` is true on the next stop) |
+| `SubagentStop` | when a subagent ends (matcher: its type) | the same, for the subagent; gets `agent_type`, `agent_id`, `agent_transcript_path` |
+| `SessionStart` | at startup, on resume, after a compaction (matcher: `startup`, `resume`, `compact`) | stdout or `additionalContext`: context sent with every call this session |
+| `SessionEnd` | on `/exit` (matcher: `prompt_input_exit`) | cleanup and logging; can't block |
+| `PreCompact` | before a compaction (matcher: `manual`, `auto`) | stdout or `additionalContext`: added to the summary instructions; exit 2 or `decision: block`: cancel it |
 
 - A hook runs with `sh -c` in the work dir, in the container, with the event as JSON on stdin (`session_id`,
   `transcript_path`, `cwd`, `hook_event_name`, `permission_mode` and the event's fields). Tool names and the
   `file_path` input field are Claude Code's, so hooks written for Claude Code work. The matcher is a regular
-  expression over the tool name.
+  expression over the tool name (or the event's source, trigger, reason or agent type, as above).
 - Other exit codes and timeouts (`timeout`, default 60 s) are shown as a dim note and don't block; `systemMessage`
   is shown too. A denial shows the call and the reason.
 - Order of the gate: a hook's deny, a deny rule, a hook's ask, an ask rule, a hook's allow, an allow rule, then the
-  defaults (mutating tools ask unless `approve=auto` or a memory file).
-- Not (yet): `SessionStart`, `SubagentStop`, `PreCompact`, `Notification` and the other events, `continue: false`,
-  and hooks in the extraction pass.
+  [permission mode](#permission-modes) (plan mode's deny of file changes comes before the ask and allow steps).
+- SessionStart context is written to `<session>.session-start`, one of the context files every call sends.
+- Not (yet): `Notification` and the other events, `continue: false`, and hooks in the extraction pass.
 
 ## Memory
 

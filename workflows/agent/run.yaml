@@ -41,8 +41,9 @@ steps:
       request_base: "{{ request_base }}"
       agent: "{{ started }}"
       instructions_file: "{{ session_file }}.instructions"
+      costs_file: "{{ session_file }}.costs"
     repeat:
-      until: "not ok or reply.stop_reason != 'tool_use'"
+      until: "not ok or (reply.stop_reason != 'tool_use' and not stop_blocked)"
       max: "{{ max_tool_rounds }}"
       on_max: stop
 

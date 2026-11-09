@@ -27,6 +27,7 @@ import sys
 from skills import frontmatter
 
 AGENT_TOOL = "agent"
+MAIN_ONLY = {AGENT_TOOL, "todo_write", "exit_plan_mode"}   # the main agent's: subagents never get them
 ALIASES = {"read": "read_file", "write": "write_file", "edit": "edit_file", "multiedit": "edit_file",
            "bash": "bash", "glob": "glob", "grep": "grep", "skill": "skill"}
 MODELS = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
@@ -96,7 +97,7 @@ def start(session, model, dirs, block, tools):
         return refusal(block, f"Unknown agent type: {kind}. Available: {', '.join(agents) or 'none'}")
     agent = agents[kind]
     wanted = agent["tools"]
-    defs = [t for t in tools if t["name"] != AGENT_TOOL and (wanted is None or t["name"] in wanted)]
+    defs = [t for t in tools if t["name"] not in MAIN_ONLY and (wanted is None or t["name"] in wanted)]
     sub_session = f"{session}.agent-{re.sub(r'[^A-Za-z0-9_-]', '', str(block.get('id')))}.jsonl"
     with open(sub_session, "w", encoding="utf-8") as f:
         f.write(json.dumps({"role": "user", "content": task}) + "\n")

@@ -8,6 +8,8 @@ vars:
   context_file: null
   skills_file: null       # the parent's reminders, so the fork's first message matches the parent's cached one
   agents_file: null
+  session_start_file: null
+  costs_file: ""
   relay_api_key: null
   request_base: null
 steps:
@@ -16,7 +18,7 @@ steps:
     params:
       interpreter: python3
       path: history.py
-      args: [messages, "{{ fork_file }}", "{{ instructions_file }}", "{{ context_file }}", "{{ skills_file }}", "{{ agents_file }}"]
+      args: [messages, "{{ fork_file }}", "{{ instructions_file }}", "{{ context_file }}", "{{ skills_file }}", "{{ agents_file }}", "{{ session_start_file }}"]
     register: history
 
   - name: call_model
@@ -82,6 +84,14 @@ steps:
       path: "{{ fork_file }}"
       append: true
       content: "{{ message | to_json }}\n"
+
+  - name: record_cost
+    type: write_file
+    when: "ok and costs_file"
+    params:
+      path: "{{ costs_file }}"
+      append: true
+      content: "{\"model\": {{ model | to_json }}, \"kind\": \"extract\", \"usage\": {{ reply.usage | to_json }}}\n"
 
   - name: run_tools
     type: script_exec

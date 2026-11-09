@@ -1,0 +1,21 @@
+# Claude Code's TodoWrite (scripts/todos.py): replace the session's todo list, and show it.
+name: tools.todo_write
+vars:
+  block: null
+  session_file: null
+steps:
+  - name: write
+    type: script_exec
+    params:
+      interpreter: python3
+      path: todos.py
+      args: [write, "{{ session_file }}"]
+      stdin: "{{ block }}"
+    register: write
+
+  - name: record
+    type: write_file
+    params:
+      path: "{{ session_file }}"
+      append: true
+      content: "{{ write.stdout | trim }}\n"

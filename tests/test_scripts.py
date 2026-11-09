@@ -13,11 +13,17 @@ import traceback
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(HERE, "scripts"))
 
+import attachments  # noqa: E402
 import compact  # noqa: E402
+import history  # noqa: E402
 import hooks  # noqa: E402
+import input as user_input  # noqa: E402
 import instructions  # noqa: E402
 import memory  # noqa: E402
+import session  # noqa: E402
 import settings  # noqa: E402
+import todos  # noqa: E402
+import window  # noqa: E402
 
 
 class workdir:
@@ -236,6 +242,53 @@ def test_stop_hook_blocks_once():
         assert memory.user_text(out["message"]) is None and memory.user_text(lines[0]) == "do it"
 
 
+def test_subagent_stop_hook_matches_the_agent_type():
+    with workdir():
+        cmd = hook("""if not data["stop_hook_active"]:
+    print("cite the files", file=sys.stderr); sys.exit(2)""")
+        write_settings({"hooks": {"SubagentStop": [{"matcher": "Explore", "hooks": [{"type": "command", "command": cmd}]}]}})
+        sub = "s.jsonl.agent-toolu_1.jsonl"
+        write(sub, json.dumps({"role": "user", "content": "find it"}) + "\n"
+              + json.dumps({"role": "assistant", "content": [{"type": "text", "text": "found"}]}) + "\n")
+        assert not hooks.stop(sub, "", "general-purpose")["block"]          # another type: no hook
+        out = hooks.stop(sub, "", "Explore")
+        assert out["block"] and out["message"]["content"][0]["text"] == "SubagentStop hook feedback:\ncite the files", out
+        assert "SubagentStop hook sent the Explore agent back" in out["notes"][0]
+        with open("hook-input.json", encoding="utf-8") as f:
+            seen = json.loads(f.readlines()[-1])
+        assert seen["agent_type"] == "Explore" and seen["agent_id"] == "toolu_1" and seen["transcript_path"] == "s.jsonl", seen
+        assert seen["agent_transcript_path"] == sub and seen["last_assistant_message"] == "found"
+
+
+def test_session_start_context_and_session_end():
+    with workdir():
+        cmd = hook("""if data["hook_event_name"] == "SessionStart":
+    print("branch is main" if data["source"] == "startup" else "resumed")""")
+        each = [{"hooks": [{"type": "command", "command": cmd}]}]
+        write_settings({"hooks": {"SessionStart": [{"matcher": "startup|resume", "hooks": each[0]["hooks"]}], "SessionEnd": each}})
+        hooks.session_start("s.jsonl", "", "startup")
+        with open("s.jsonl.session-start", encoding="utf-8") as f:
+            assert f.read() == "SessionStart:startup hook additional context: branch is main"
+        hooks.session_start("s.jsonl", "", "compact")                     # the matcher leaves it out
+        assert os.path.getsize("s.jsonl.session-start") == 0
+        hooks.session_end("s.jsonl", "", "prompt_input_exit")
+        with open("hook-input.json", encoding="utf-8") as f:
+            seen = json.loads(f.readlines()[-1])
+        assert seen["hook_event_name"] == "SessionEnd" and seen["reason"] == "prompt_input_exit", seen
+
+
+def test_pre_compact_hook_adds_instructions_or_blocks():
+    with workdir():
+        cmd = hook("""if data["trigger"] == "auto":
+    print("not now", file=sys.stderr); sys.exit(2)
+print("keep every number")""")
+        write_settings({"hooks": {"PreCompact": [{"hooks": [{"type": "command", "command": cmd}]}]}})
+        out = hooks.pre_compact("s.jsonl", "", "manual", {"instructions": "focus on tests"})
+        assert not out["blocked"] and out["instructions"] == "focus on tests\n\nkeep every number", out
+        out = hooks.pre_compact("s.jsonl", "", "auto", {"instructions": ""})
+        assert out["blocked"] and "PreCompact hook blocked the compaction: not now" in out["notes"], out
+
+
 # ---- CLAUDE.md ----
 
 def test_instructions_context_order_and_agents_fallback():
@@ -315,10 +368,203 @@ def test_compaction_keeps_the_message_just_typed():
         assert "Continue the conversation" not in now[0]["content"][0]["text"]   # the user's question follows
 
 
+def test_compaction_keeps_the_latest_messages_verbatim():
+    with workdir():
+        big = "x" * 4000                                                     # about 1000 tokens a message
+        lines = [{"role": "user", "content": "start " + big},
+                 {"role": "assistant", "content": [{"type": "text", "text": "a1 " + big}]},
+                 {"role": "user", "content": "second " + big},
+                 {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "bash", "input": {"command": big}}]},
+                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "out " + big}]},
+                 {"role": "assistant", "content": [{"type": "tool_use", "id": "t2", "name": "bash", "input": {"command": "ls"}}]},
+                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "content": "done"}]}]
+        cut = lambda keep: len(lines) - len(compact.split(lines, keep)[1])
+        assert cut(1500) == 5                              # starts at the assistant whose tool_result follows
+        assert cut(2500) == 3                              # never at a tool_result (4)
+        assert cut(3500) == 2                              # or at a message the user typed
+        head, tail = compact.split(lines, 100000)
+        assert head == lines[:2] and tail == lines[2:]     # one assistant message is left to summarize
+        assert compact.split(lines, 0) == (lines, [])
+        write("s.jsonl", "".join(json.dumps(m) + "\n" for m in lines))
+        req = compact.request("s.jsonl", [], "", 1500)
+        assert "t2" not in json.dumps(req["messages"]) and req["messages"][-1]["content"][0]["type"] == "tool_result"
+        reply = {"content": [{"type": "text", "text": "<summary>Working on it.</summary>"}], "stop_reason": "end_turn"}
+        out = compact.apply("s.jsonl", False, reply, 1500)
+        assert out["ok"] and out["kept"] == 2, out
+        now = history.read_lines("s.jsonl")
+        assert now[1:] == lines[5:] and "The most recent messages follow verbatim." in now[0]["content"][0]["text"]
+        assert [m["role"] for m in history.merge(now)] == ["user", "assistant", "user"]
+
+
 def test_compaction_needs_a_conversation():
     with workdir():
         write("s.jsonl", json.dumps({"role": "user", "content": "hi"}) + "\n")
         assert compact.request("s.jsonl", [], "") == {"ok": False, "error": "nothing to compact yet", "messages": []}
+
+
+# ---- /context ----
+
+def test_context_command_and_breakdown():
+    assert user_input.expand("/context", [], [])["context"] is True
+    with workdir():
+        lines = [{"role": "user", "content": "hello " * 50}, {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}]
+        write("s.jsonl", "".join(json.dumps(m) + "\n" for m in lines))
+        write("s.jsonl.instructions", "rule " * 50)
+        data = {"model": "m", "system": [{"type": "text", "text": "sys"}], "tools": [{"name": "t"}], "thinking": {"type": "adaptive", "display": "x"}}
+        b = window.bodies("s.jsonl", ["s.jsonl.instructions"], data)
+        assert b["full"]["thinking"] == {"type": "adaptive"} and "tools" not in b["system"] and len(b["full"]["messages"]) == 2
+        ok = lambda n: {"status_code": 200, "body": {"input_tokens": n}}
+        rows, exact, n = window.parts("s.jsonl", ["s.jsonl.instructions"], {"counts": [ok(8), ok(108), ok(408), ok(708)]})
+        rows = dict(rows)
+        assert exact and n == 2 and rows["System prompt"] == 100 and rows["Tools"] == 300, rows
+        assert rows["CLAUDE.md"] + rows["Messages"] == 308 and rows["CLAUDE.md"] > 0, rows
+        rows, exact, _ = window.parts("s.jsonl", [], {"counts": [ok(8), {"status_code": 404, "body": {}}], **data})
+        assert not exact and dict(rows)["Messages"] > 0
+
+
+# ---- modes, todos, attachments, session commands ----
+
+def lines_of(path):
+    return history.read_lines(path)
+
+
+def test_permission_modes_in_the_gate():
+    with workdir():
+        session.init("s.jsonl", "ask", "plan", "/host")
+        g = lambda *b: hooks.pre("s.jsonl", "", {"reply": {"content": list(b), "invalid": []}, "approve": "ask",
+                                                 "memory_dir": "/x", "mutating_tools": ["bash", "write_file", "edit_file"]})
+        out = g(tool_use("write_file", path="a.txt", content="x"), tool_use("bash", command="ls"), tool_use("read_file", path="a"))
+        assert [c["decision"] for c in out["calls"]] == ["deny", "ask", "allow"] and "exit_plan_mode" in out["calls"][0]["reason"]
+        session.set_mode("s.jsonl", "acceptEdits")
+        out = g(tool_use("edit_file", path="src/a.py"), tool_use("write_file", path="/etc/x"), tool_use("bash", command="ls"))
+        assert [c["decision"] for c in out["calls"]] == ["allow", "ask", "ask"], out
+        assert out["calls"][0]["reason"] == "allowed in accept-edits mode"
+        session.set_mode("s.jsonl", "bypassPermissions")
+        assert [c["decision"] for c in g(tool_use("bash", command="ls"))["calls"]] == ["allow"]
+        # a subagent's session follows the main session's mode
+        assert session.mode(hooks.main_session("s.jsonl.agent-t1.jsonl")) == "bypassPermissions"
+        assert session.status("s.jsonl", "m")["label"].startswith("⏵⏵ bypass")
+
+
+def test_todo_write_and_stale_reminder():
+    with workdir():
+        block = {"id": "t1", "name": "todo_write", "input": {"todos": [
+            {"content": "Run tests", "status": "in_progress", "activeForm": "Running tests"},
+            {"content": "Fix bug", "status": "pending", "activeForm": "Fixing bug"}]}}
+        msg, error = todos.write("s.jsonl", block)
+        assert not error and msg["content"][0]["content"].startswith("Todos have been modified successfully")
+        assert [t["status"] for t in todos.load("s.jsonl")] == ["in_progress", "pending"]
+        _, error = todos.write("s.jsonl", {"id": "t2", "input": {"todos": [{"content": "x", "status": "done"}]}})
+        assert "status must be one of" in error and len(todos.load("s.jsonl")) == 2      # unchanged
+        say = {"role": "assistant", "content": [{"type": "text", "text": "working"}]}
+        user = {"role": "user", "content": "go on"}
+        lines = [user] + [say, user] * 9
+        write("s.jsonl", "".join(json.dumps(m) + "\n" for m in lines))
+        assert attachments.before("s.jsonl")["added"] == []                              # 9 replies: not yet
+        with open("s.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(say) + "\n" + json.dumps(user) + "\n")
+        assert attachments.before("s.jsonl")["added"] == ["todos"]
+        text = lines_of("s.jsonl")[-1]["content"][0]["text"]
+        assert "hasn't been used recently" in text and "Running tests" in text, text
+        assert attachments.before("s.jsonl")["added"] == []                              # not again so soon
+
+
+def test_plan_mode_reminders_and_exit_plan():
+    with workdir():
+        session.init("s.jsonl", "ask", "default", "/host")
+        session.set_mode("s.jsonl", "plan")
+        write("s.jsonl", json.dumps({"role": "user", "content": "add a flag"}) + "\n")
+        assert attachments.before("s.jsonl")["added"] == ["plan"]
+        assert attachments.before("s.jsonl")["added"] == []                    # once per turn: not mid-turn
+        block = {"id": "t1", "name": "exit_plan_mode", "input": {"plan": "1. edit x"}}
+        rejected = session.exit_plan("s.jsonl", "n", block)["content"][0]
+        assert rejected["is_error"] and "still in plan mode" in rejected["content"] and session.mode("s.jsonl") == "plan"
+        approved = session.exit_plan("s.jsonl", "a", block)["content"][0]
+        assert "approved your plan" in approved["content"] and "1. edit x" in approved["content"]
+        assert session.mode("s.jsonl") == "acceptEdits" and not session.load("s.jsonl")["plan_exited"]
+        assert session.exit_plan("s.jsonl", "", block)["content"][0]["content"] == session.NOT_PLANNING
+        session.set_mode("s.jsonl", "plan")
+        session.set_mode("s.jsonl", "default")                                 # /mode out of plan mode
+        with open("s.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"role": "user", "content": "go"}) + "\n")
+        assert attachments.before("s.jsonl")["added"] == ["plan_exited"]
+        assert attachments.before("s.jsonl")["added"] == []
+
+
+def test_changed_files_are_reported_once():
+    with workdir():
+        write("a.txt", "one\ntwo\nthree\n")
+        write("s.jsonl", json.dumps({"role": "user", "content": "hi"}) + "\n")
+        attachments.track("s.jsonl", "a.txt")
+        assert attachments.before("s.jsonl")["added"] == []
+        time.sleep(0.01)
+        write("a.txt", "one\nTWO\nthree\nfour\n")
+        assert attachments.before("s.jsonl")["added"] == ["changed_file"]
+        text = lines_of("s.jsonl")[-1]["content"][0]["text"]
+        assert "a.txt was modified" in text and "     2\tTWO" in text and "     4\tfour" in text, text
+        assert attachments.before("s.jsonl")["added"] == []
+        os.utime("a.txt")                                                       # touched, not changed
+        assert attachments.before("s.jsonl")["added"] == []
+
+
+def test_at_mentions_attach_files_and_directories():
+    with workdir() as cwd:
+        write("src/app.py", "print('hi')\n")
+        out = user_input.expand("look at @src/app.py, and @src please; not @nope or @agent-x", [], [], "s.jsonl", 1000)
+        assert out["files"] == [os.path.join(cwd, "src/app.py"), os.path.join(cwd, "src")], out["files"]
+        texts = [b["text"] for b in out["message"]["content"]]
+        assert texts[0].startswith("look at") and "Called the Read tool" in texts[1] and "     1\tprint('hi')" in texts[2]
+        assert "Called the Bash tool" in texts[3] and "app.py" in texts[4]
+        assert os.path.join(cwd, "src/app.py") in attachments.load_reads("s.jsonl")   # tracked for changes
+        assert user_input.expand("email me @ noon", [], [], "s.jsonl")["message"]["content"] == "email me @ noon"
+
+
+def test_session_commands():
+    with workdir():
+        assert user_input.expand("/model sonnet", [], [])["session_command"] == {"name": "model", "args": "sonnet"}
+        assert user_input.expand("/clear", [], [])["session_command"]["name"] == "clear"
+        assert user_input.expand("/clear now", [], [])["session_command"] is None      # not a command: a skill lookup
+        session.init("s.jsonl", "ask", "default", "/host")
+        session.command("s.jsonl", {"name": "mode"})
+        assert session.mode("s.jsonl") == "acceptEdits"
+        session.command("s.jsonl", {"name": "plan"})
+        assert session.mode("s.jsonl") == "plan"
+        session.command("s.jsonl", {"name": "plan"})
+        assert session.mode("s.jsonl") == "default"
+        session.command("s.jsonl", {"name": "model", "args": "opus", "default_model": "claude-haiku-5-5"})
+        assert session.status("s.jsonl", "claude-haiku-5-5")["model"] == "claude-opus-5-5"
+        lines = [{"role": "user", "content": "first prompt here"}, {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}]
+        write("s.jsonl", "".join(json.dumps(m) + "\n" for m in lines))
+        write("s.jsonl.todos", "[]")
+        session.command("s.jsonl", {"name": "clear"})
+        assert lines_of("s.jsonl") == [] and len(lines_of("s.jsonl.cleared-1.jsonl")) == 2
+        assert session.mode("s.jsonl") == "default"
+
+
+def test_cost_prices_each_call():
+    with workdir():
+        prices = {"claude-haiku-5-5": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125,
+                                       "long_above": 100000, "long": {"input": 0.50, "output": 2.50}}}
+        calls = [{"model": "claude-haiku-5-5", "kind": "main", "usage": {"input_tokens": 1000000, "output_tokens": 1000000}},
+                 {"model": "claude-haiku-5-5", "kind": "compact", "usage": {"input_tokens": 200000, "output_tokens": 0}},
+                 {"model": "other", "kind": "subagent", "usage": {"input_tokens": 5}}]
+        write("s.jsonl.costs", "".join(json.dumps(c) + "\n" for c in calls))
+        c = session.cost("s.jsonl", prices)
+        # the first call's prompt is over 100k: long rates (0.50 + 2.50); the second too (0.10)
+        assert abs(c["usd"] - (0.5 + 2.5 + 0.1)) < 1e-9 and c["unpriced"] == ["other"] and c["calls"] == 3, c
+        assert c["kinds"] == {"main": 1, "compact": 1, "subagent": 1}
+
+
+def test_sessions_list_for_a_work_dir():
+    with workdir():
+        os.makedirs("sessions")
+        for name, wd in (("a.jsonl", "/w1"), ("b.jsonl", "/w2"), ("c.jsonl", "/w1")):
+            write(f"sessions/{name}", json.dumps({"role": "user", "content": f"prompt {name}"}) + "\n")
+            session.init(f"sessions/{name}", "ask", "default", wd)
+            time.sleep(0.01)
+        write("sessions/c.jsonl.compacted-1.jsonl", "{}\n")
+        found = session.sessions("sessions", "/w1")
+        assert [s["name"] for s in found] == ["c.jsonl", "a.jsonl"] and found[0]["prompt"] == "prompt c.jsonl", found
 
 
 def main(argv):

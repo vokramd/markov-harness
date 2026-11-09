@@ -31,6 +31,15 @@ steps:
       append: true
       content: "{{ message | to_json }}\n"
 
+  # Its content as the session now knows it, so only later changes are reported (scripts/attachments.py).
+  - name: track
+    type: script_exec
+    when: "read.exit_code == 0"
+    params:
+      interpreter: python3
+      path: attachments.py
+      args: [track, "{{ session_file }}", "{{ block.input.path }}"]
+
   # CLAUDE.md files of the directories between the work dir and the file, once per session
   # (scripts/instructions.py nested): a reminder after the tool result.
   - name: nested
